@@ -38,4 +38,4 @@ services:
       - key: DOCX_PRICE_SYP
         value: "25"
       - key: QR_IMAGE_PATH
-        value: ./assets/sham_cash_qr.png
+        value: ./assets/sham_cash_qr.jpeg

@@ -48,7 +48,7 @@ class Settings:
     sham_cash_code: str = field(default_factory=lambda: _get_env("SHAM_CASH_CODE", required=True))
     docx_price_usd: str = field(default_factory=lambda: _get_env("DOCX_PRICE_USD", "0.20"))
     docx_price_syp: str = field(default_factory=lambda: _get_env("DOCX_PRICE_SYP", "25"))
-    qr_image_path: str = field(default_factory=lambda: _get_env("QR_IMAGE_PATH", "./assets/sham_cash_qr.png"))
+    qr_image_path: str = field(default_factory=lambda: _get_env("QR_IMAGE_PATH", "./assets/sham_cash_qr.jpeg"))
 
     # --- Redis queue names ---
     queue_cv_generation: str = "queue:cv_generation"
