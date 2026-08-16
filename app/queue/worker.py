@@ -26,18 +26,10 @@ logger = logging.getLogger(__name__)
 async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
     chat_id = payload["chat_id"]
     user_id = payload["user_id"]
-    raw_text = payload["raw_text"]
-    language = payload.get("language", "ar")
-
-    try:
-        cv_data = await gemini_service.extract_cv_from_text(raw_text, language=language)
-    except Exception:
-        logger.exception("فشل استخراج بيانات السيرة الذاتية عبر Gemini")
-        await bot.send_message(
-            chat_id,
-            "⚠️ حدث خطأ أثناء تحليل بياناتك. من فضلك حاول مرة أخرى بعد قليل.",
-        )
-        return
+    # بيانات السيرة الذاتية تصل جاهزة ومهيكلة من المعالج (handlers.py) بعد التأكد من
+    # اكتمال المعلومات مع المستخدم عبر جولات الحوار، فلا حاجة لاستدعاء Gemini مجدداً هنا
+    cv_data = payload["cv_data"]
+    language = cv_data.get("_language", "ar")
 
     try:
         pdf_bytes = generate_cv_pdf(cv_data)

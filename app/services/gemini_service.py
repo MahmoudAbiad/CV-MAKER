@@ -20,10 +20,22 @@ logger = logging.getLogger(__name__)
 
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
-# مخطط JSON الذي يجب أن يلتزم به Gemini عند استخراج بيانات السيرة الذاتية
-_CV_JSON_SCHEMA: dict[str, Any] = {
+# مخطط JSON الذي يجب أن يلتزم به Gemini عند فحص اكتمال المعلومات واستخراج بيانات السيرة الذاتية
+# ملاحظة: الحقول المتعلقة بالسيرة الذاتية غير إلزامية هنا (قد تصل جزئية أثناء جولات
+# استكمال المعلومات)، بينما status و follow_up_message إلزاميان دوماً لأنهما يحكمان
+# منطق الحوار مع المستخدم.
+_CV_CHECK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["complete", "needs_more_info"],
+            "description": "complete إذا كانت المعلومات الأساسية كافية لبناء سيرة ذاتية، وإلا needs_more_info",
+        },
+        "follow_up_message": {
+            "type": "string",
+            "description": "رسالة ودّية للمستخدم تطلب المعلومات الناقصة تحديداً؛ نص فارغ إن كانت الحالة complete",
+        },
         "full_name": {"type": "string"},
         "title": {"type": "string", "description": "المسمى الوظيفي المقترح"},
         "summary": {"type": "string", "description": "ملخص احترافي قصير"},
@@ -61,32 +73,125 @@ _CV_JSON_SCHEMA: dict[str, Any] = {
         "skills": {"type": "array", "items": {"type": "string"}},
         "languages": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["full_name", "summary", "experience", "skills"],
+    "required": ["status", "follow_up_message"],
 }
 
-_SYSTEM_PROMPTS = {
+# الشخصية الأساسية للمساعد + توجيه لغة الحقول النهائية للسيرة الذاتية
+_BASE_PROMPTS = {
     "ar": (
-        "أنت خبير موارد بشرية متخصص في كتابة السير الذاتية الاحترافية. "
-        "سيصلك نص عشوائي (قد يكون بالعامية أو الفصحى أو حتى بالإنجليزية) يصف خبرة شخص ما. "
-        "مهمتك: استخرج المعلومات وأعد صياغة كل الحقول النصية باللغة العربية الفصحى حصراً، "
-        "بأسلوب احترافي يستخدم أفعال حركية قوية (مثل: قاد، طوّر، حسّن، نفّذ). "
-        "حتى لو كان النص الأصلي بالإنجليزية، ترجم المحتوى وأعد صياغته بالعربية. "
-        "أرجع النتيجة حصراً وفق مخطط JSON المحدد دون أي نص إضافي."
+        "أنت مساعد خبير في كتابة السير الذاتية الاحترافية. سيصلك من المستخدم نص أو أكثر "
+        "(قد يكون بالعامية أو الفصحى أو حتى بالإنجليزية) يصف خبرته ودراسته ومهاراته، وربما "
+        "رسائل متابعة لاحقة تكمّل معلومات ناقصة. اعتبر كل الرسائل المُرسلة من المستخدم مجتمعة "
+        "كمصدر واحد للمعلومات. بغض النظر عن لغة النص الأصلي، يجب أن تكون كل الحقول النصية في "
+        "الناتج النهائي باللغة العربية الفصحى دائماً."
     ),
     "en": (
-        "You are a professional HR expert specializing in writing polished resumes/CVs. "
-        "You will receive an unstructured, possibly casual or dialect-heavy text (which may even be "
-        "written in Arabic) describing someone's background. "
-        "Your task: extract the information and rewrite every text field in professional, fluent English "
-        "using strong action verbs (e.g., led, developed, improved, implemented). "
-        "Even if the source text is in Arabic, translate and rewrite the content in English. "
-        "Return the result strictly following the given JSON schema, with no extra text."
+        "You are an expert assistant specializing in writing professional CVs. You will receive one or "
+        "more messages from the user (possibly casual, dialect-heavy, or even written in Arabic) "
+        "describing their experience, education, and skills, and possibly later follow-up messages "
+        "completing missing information. Treat all the user's messages together as one combined source "
+        "of information. Regardless of the original language, every text field in the final output must "
+        "always be in fluent, professional English."
     ),
 }
 
+# أسلوب إعادة الصياغة: يتحكم به اختيار المستخدم بين النص كما هو أو تحسين الذكاء الاصطناعي له
+_STYLE_INSTRUCTIONS = {
+    "ar": {
+        "raw": (
+            "أسلوب الكتابة المطلوب: حافظ على كلام المستخدم وحقائقه كما هي قدر الإمكان. صحّح فقط "
+            "الأخطاء الإملائية والنحوية البسيطة، ونظّم المعلومات ضمن الحقول المطلوبة، دون إضافة "
+            "أوصاف أو إنجازات أو مهارات لم يذكرها المستخدم صراحة، ودون استخدام عبارات تسويقية "
+            "مبالغ فيها لم ترد في كلامه."
+        ),
+        "enhanced": (
+            "أسلوب الكتابة المطلوب: أعد صياغة كل الحقول النصية بأسلوب احترافي جذاب يستخدم أفعال "
+            "حركية قوية (مثل: قاد، طوّر، حسّن، نفّذ، صمّم، ابتكر)، مع الحفاظ التام على صحة "
+            "المعلومات كما ذكرها المستخدم دون اختراع وقائع أو إنجازات جديدة لم يذكرها."
+        ),
+    },
+    "en": {
+        "raw": (
+            "Writing style required: preserve the user's own wording and facts as closely as possible. "
+            "Only fix minor spelling/grammar mistakes and organize the information into the required "
+            "fields, without adding achievements, skills, or descriptions the user did not explicitly "
+            "mention, and without exaggerated marketing language they did not use."
+        ),
+        "enhanced": (
+            "Writing style required: rewrite every text field in a polished, professional tone using "
+            "strong action verbs (e.g., led, developed, improved, implemented, designed, pioneered), "
+            "while strictly preserving the facts exactly as provided by the user without inventing new "
+            "achievements or facts."
+        ),
+    },
+}
 
-def _system_prompt(language: str) -> str:
-    return _SYSTEM_PROMPTS.get(language, _SYSTEM_PROMPTS["ar"])
+# معايير اكتمال المعلومات + أسلوب طرح السؤال التكميلي على المستخدم
+_COMPLETENESS_INSTRUCTIONS = {
+    "ar": (
+        "بالإضافة لما سبق، أنت مسؤول عن التحقق من اكتمال المعلومات الأساسية اللازمة لبناء سيرة "
+        "ذاتية مفيدة، وهي:\n"
+        "1) الاسم الكامل للمستخدم\n"
+        "2) عنصر واحد على الأقل بتفاصيل حقيقية من (خبرة عملية) أو (تعليم/دراسة)\n"
+        "3) قائمة مهارات لا تقل عن مهارتين اثنتين\n\n"
+        "إن كان أي من هذه العناصر ناقصاً أو غامضاً جداً، اجعل status يساوي \"needs_more_info\" "
+        "واكتب في follow_up_message رسالة قصيرة ودّية باللهجة العربية العامية السورية "
+        "المحترمة (بدون أي ألفاظ غير لائقة، وبأسلوب لطيف كأنك موظف استقبال محترف)، تشكر "
+        "المستخدم بإيجاز على ما أرسله حتى الآن، ثم تطلب منه تحديداً وبوضوح العناصر الناقصة فقط "
+        "(لا تكرر السؤال عن معلومات أرسلها المستخدم فعلاً). اجعلها رسالة واحدة قصيرة ومباشرة.\n\n"
+        "أما إن كانت جميع العناصر الأساسية الثلاثة متوفرة (حتى لو بشكل مختصر)، اجعل status يساوي "
+        "\"complete\"، اترك follow_up_message نصاً فارغاً \"\"، واستخرج بقية الحقول "
+        "(full_name, title, summary, contact, experience, education, skills, languages) بأفضل "
+        "صياغة ممكنة."
+    ),
+    "en": (
+        "In addition, you are responsible for judging whether the essential information needed to "
+        "build a useful CV is complete, namely:\n"
+        "1) The user's full name\n"
+        "2) At least one item with real details from either (work experience) or (education)\n"
+        "3) A skills list with at least two skills\n\n"
+        "If any of these is missing or too vague, set status to \"needs_more_info\" and write a short, "
+        "friendly, respectful message in follow_up_message (polite conversational tone, like a "
+        "professional receptionist) that briefly thanks the user for what they already shared, then "
+        "clearly asks only for the specific missing pieces (do not re-ask for information already "
+        "given). Keep it to one short, direct message.\n\n"
+        "If all three essential elements are present (even briefly), set status to \"complete\", leave "
+        "follow_up_message as an empty string \"\", and extract the remaining fields (full_name, title, "
+        "summary, contact, experience, education, skills, languages) in the best possible form."
+    ),
+}
+
+_FORCE_COMPLETE_SUFFIX = {
+    "ar": (
+        "\n\nملاحظة هامة: المستخدم استنفد عدد محاولات إرسال معلومات إضافية. لذلك يجب أن يكون "
+        "status = \"complete\" إلزامياً الآن مهما كانت المعلومات المتوفرة، واملأ الحقول الناقصة "
+        "بأقل افتراض معقول أو اتركها فارغة، دون طلب أي معلومة إضافية أخرى."
+    ),
+    "en": (
+        "\n\nImportant note: the user has used up their attempts to send more information. You MUST "
+        "set status = \"complete\" now regardless of what information is available, filling any gaps "
+        "with minimal reasonable defaults or leaving them empty, without asking for anything else."
+    ),
+}
+
+_FINAL_INSTRUCTION = {
+    "ar": "أرجع النتيجة حصراً وفق مخطط JSON المحدد دون أي نص إضافي خارج الحقول.",
+    "en": "Return the result strictly following the given JSON schema, with no extra text outside the fields.",
+}
+
+
+def _build_system_prompt(language: str, style: str, force_complete: bool) -> str:
+    parts = [
+        _BASE_PROMPTS.get(language, _BASE_PROMPTS["ar"]),
+        _STYLE_INSTRUCTIONS.get(language, _STYLE_INSTRUCTIONS["ar"]).get(
+            style, _STYLE_INSTRUCTIONS[language]["enhanced"]
+        ),
+        _COMPLETENESS_INSTRUCTIONS.get(language, _COMPLETENESS_INSTRUCTIONS["ar"]),
+    ]
+    if force_complete:
+        parts.append(_FORCE_COMPLETE_SUFFIX.get(language, _FORCE_COMPLETE_SUFFIX["ar"]))
+    parts.append(_FINAL_INSTRUCTION.get(language, _FINAL_INSTRUCTION["ar"]))
+    return "\n\n".join(parts)
 
 
 async def _call_gemini_with_retry(
@@ -120,32 +225,54 @@ async def _call_gemini_with_retry(
     raise RuntimeError(f"فشل الاتصال بـ Gemini بعد {max_retries} محاولات: {last_error}")
 
 
-async def extract_cv_from_text(raw_text: str, language: str = "ar") -> dict[str, Any]:
+async def check_and_extract_cv(
+    raw_text: str,
+    language: str = "ar",
+    style: str = "enhanced",
+    force_complete: bool = False,
+) -> dict[str, Any]:
     """
-    يرسل نص المستخدم الخام إلى Gemini ويستقبل بيانات سيرة ذاتية مهيكلة.
-    language: "ar" أو "en" - يحدد لغة محتوى السيرة الذاتية الناتجة (وليس بالضرورة لغة النص المُدخل).
+    يرسل النص المتراكم من المستخدم (قد يضم عدة رسائل متتالية) إلى Gemini، والذي يقوم بدورين معاً:
+    1) الحكم على اكتمال المعلومات الأساسية (status: complete / needs_more_info) وصياغة سؤال
+       متابعة ودّي بالعامية عند النقص (follow_up_message).
+    2) استخراج بيانات السيرة الذاتية المهيكلة بأفضل شكل ممكن متى ما توفرت المعلومات.
+
+    language: "ar" أو "en" - لغة محتوى السيرة الذاتية الناتجة.
+    style: "raw" (الحفاظ على كلام المستخدم كما هو) أو "enhanced" (تحسين الصياغة بلمسة احترافية).
+    force_complete: يُستخدم بعد استنفاد عدد محاولات استكمال المعلومات لإجبار Gemini على
+        الاكتفاء بالمتوفر بدل الاستمرار بطلب المزيد إلى ما لا نهاية.
     """
     if language not in ("ar", "en"):
         language = "ar"
+    if style not in ("raw", "enhanced"):
+        style = "enhanced"
 
     url = f"{_GEMINI_BASE}/{settings.gemini_text_model}:generateContent?key={settings.gemini_api_key}"
     body = {
-        "system_instruction": {"parts": [{"text": _system_prompt(language)}]},
+        "system_instruction": {
+            "parts": [{"text": _build_system_prompt(language, style, force_complete)}]
+        },
         "contents": [{"role": "user", "parts": [{"text": raw_text}]}],
         "generationConfig": {
             "response_mime_type": "application/json",
-            "response_schema": _CV_JSON_SCHEMA,
+            "response_schema": _CV_CHECK_SCHEMA,
             "temperature": 0.4,
         },
     }
     data = await _call_gemini_with_retry(url, body)
     text_part = data["candidates"][0]["content"]["parts"][0]["text"]
-    cv_data: dict[str, Any] = json.loads(text_part)
+    result: dict[str, Any] = json.loads(text_part)
 
-    # نضمّن اللغة داخل البيانات نفسها كي يستخدمها مولّدا PDF وDOCX لاحقاً
-    # لتحديد اتجاه النص (RTL/LTR) وعناوين الأقسام، دون الحاجة لتعديل مخطط قاعدة البيانات
-    cv_data["_language"] = language
-    return cv_data
+    if force_complete:
+        result["status"] = "complete"
+
+    if result.get("status") == "complete":
+        # نضمّن اللغة والأسلوب داخل البيانات نفسها كي يستخدمهما مولّدا PDF وDOCX لاحقاً
+        # دون الحاجة لتعديل مخطط قاعدة البيانات
+        result["_language"] = language
+        result["_style"] = style
+
+    return result
 
 
 async def verify_payment_receipt(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict[str, Any]:

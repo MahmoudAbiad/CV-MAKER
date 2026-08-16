@@ -26,11 +26,13 @@ from app.bot.keyboards import (
     admin_panel_keyboard,
     admin_review_keyboard,
     cv_language_keyboard,
+    cv_style_keyboard,
     docx_offer_keyboard,
     payment_instructions_keyboard,
 )
 from app.config import settings
 from app.queue.redis_client import enqueue
+from app.services import gemini_service
 from app.services.db import db
 
 logger = logging.getLogger(__name__)
@@ -38,9 +40,14 @@ logger = logging.getLogger(__name__)
 user_router = Router(name="user")
 admin_router = Router(name="admin")
 
+# أقصى عدد جولات لطلب معلومات إضافية من المستخدم قبل المتابعة إجبارياً بالمتوفر لدينا
+MAX_INFO_ROUNDS = 4
 
-class CvLanguageStates(StatesGroup):
+
+class CvBuildStates(StatesGroup):
+    waiting_for_style = State()
     waiting_for_language = State()
+    waiting_for_more_info = State()
 
 
 class PaymentStates(StatesGroup):
@@ -60,11 +67,13 @@ class RejectStates(StatesGroup):
 # =====================================================================
 
 WELCOME_TEXT = (
-    "👋 أهلاً بك في بوت إنشاء السير الذاتية الاحترافية!\n\n"
+    "👋 أهلاً فيك بوت إنشاء السير الذاتية الاحترافية!\n\n"
     "فقط أرسل لي نبذة عن خبراتك ودراستك ومهاراتك بأسلوبك الخاص "
-    "(حتى لو باللهجة العامية، وسواء كتبت بالعربية أو الإنجليزية)، "
-    "وسأسألك بعدها عن لغة السيرة الذاتية الناتجة (عربي / English) "
-    "ثم أحوّلها إلى سيرة ذاتية احترافية بصيغة PDF مجاناً خلال ثوانٍ 📄✨\n\n"
+    "(حتى لو باللهجة العامية، وسواء كتبت بالعربية أو الإنجليزية).\n\n"
+    "بعدها رح أسألك إذا حابب سيرتك تطلع متل ما كتبتها بالضبط، ولا تحب الذكاء الاصطناعي "
+    "يلمّعها ويحسّن صياغتها، وبعدها عن لغة السيرة الذاتية الناتجة (عربي / English). "
+    "وإذا لاحظت إنو في معلومة أساسية ناقصة (متل الاسم أو المهارات)، رح إسألك عنها "
+    "قبل ما نكمل، حتى تطلع سيرتك متكاملة واحترافية 📄✨\n\n"
     "مثال: \"أنا محمد، عندي خبرة 3 سنين مبيعات بشركة اتصالات، بعرف "
     "إدارة فريق واستخدام برامج CRM، تخرجت من كلية إدارة أعمال 2020\""
 )
@@ -84,19 +93,43 @@ async def handle_free_text_cv(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # نخزّن النص المُرسل مؤقتاً وننتظر اختيار المستخدم للغة السيرة الذاتية
+    # نخزّن النص المُرسل مؤقتاً وننتظر اختيار المستخدم لأسلوب الصياغة
     await state.update_data(raw_text=message.text)
-    await state.set_state(CvLanguageStates.waiting_for_language)
+    await state.set_state(CvBuildStates.waiting_for_style)
 
     await message.answer(
+        "تمام، وصلتني المعلومات 👌\n\n"
+        "قبل ما نكمل، حابب سيرتك الذاتية تطلع بالضبط متل ما كتبتها (بس منظّمة ومرتبة)، "
+        "ولا تحب الذكاء الاصطناعي يضيف عليها لمسة احترافية ويحسّن الصياغة؟",
+        reply_markup=cv_style_keyboard(),
+    )
+
+
+@user_router.callback_query(
+    StateFilter(CvBuildStates.waiting_for_style), F.data.startswith("cv_style:")
+)
+async def handle_cv_style_choice(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    style = callback.data.split(":")[1]  # "raw" أو "enhanced"
+
+    await state.update_data(style=style)
+    await state.set_state(CvBuildStates.waiting_for_language)
+
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(
         "🌐 باي لغة تحب تكون سيرتك الذاتية؟\n"
         "In which language would you like your CV?",
         reply_markup=cv_language_keyboard(),
     )
 
 
+@user_router.message(StateFilter(CvBuildStates.waiting_for_style))
+async def handle_style_choice_fallback(message: Message) -> None:
+    await message.answer("⬆️ من فضلك اختر أحد الخيارين بالضغط على الأزرار أعلاه.")
+
+
 @user_router.callback_query(
-    StateFilter(CvLanguageStates.waiting_for_language), F.data.startswith("cv_lang:")
+    StateFilter(CvBuildStates.waiting_for_language), F.data.startswith("cv_lang:")
 )
 async def handle_cv_language_choice(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
@@ -104,36 +137,100 @@ async def handle_cv_language_choice(callback: CallbackQuery, state: FSMContext) 
 
     data = await state.get_data()
     raw_text = data.get("raw_text")
-    await state.clear()
+    style = data.get("style", "enhanced")
 
     if not raw_text:
+        await state.clear()
         await callback.message.answer("⚠️ انتهت صلاحية الجلسة، من فضلك أعد إرسال وصف خبراتك من جديد.")
         return
 
     await callback.message.edit_reply_markup(reply_markup=None)
+    await state.update_data(language=language, attempts=0)
+    await _run_completeness_check(callback.message, state, raw_text, language, style, attempts=0)
+
+
+async def _run_completeness_check(
+    message: Message,
+    state: FSMContext,
+    raw_text: str,
+    language: str,
+    style: str,
+    attempts: int,
+) -> None:
+    """يستدعي Gemini للحكم على اكتمال المعلومات: إمّا يطلب من المستخدم إكمالها بلهجة ودّية،
+    أو يعتبرها كافية ويرسل الطلب لطابور توليد الـ PDF."""
+    thinking_text = "⏳ لحظة، عم راجع المعلومات..." if language == "ar" else "⏳ One moment, reviewing your details..."
+    await message.answer(thinking_text)
+
+    force_complete = attempts >= MAX_INFO_ROUNDS
+    try:
+        result = await gemini_service.check_and_extract_cv(
+            raw_text, language=language, style=style, force_complete=force_complete
+        )
+    except Exception:
+        logger.exception("فشل فحص/استخراج بيانات السيرة الذاتية عبر Gemini")
+        await state.clear()
+        await message.answer(
+            "⚠️ صار في خطأ أثناء تحليل بياناتك. من فضلك حاول مرة أخرى بعد قليل."
+            if language == "ar"
+            else "⚠️ Something went wrong while analyzing your details. Please try again shortly."
+        )
+        return
+
+    if result.get("status") != "complete":
+        follow_up = result.get("follow_up_message") or (
+            "ممكن ترسللي كم معلومة إضافية عن خبراتك أو دراستك ومهاراتك؟"
+            if language == "ar"
+            else "Could you share a bit more about your experience, education, or skills?"
+        )
+        await state.update_data(attempts=attempts + 1)
+        await state.set_state(CvBuildStates.waiting_for_more_info)
+        await message.answer(follow_up)
+        return
+
+    # اكتملت المعلومات: ننتقل لتوليد ملف PDF عبر عامل الخلفية
+    await state.clear()
     processing_text = (
-        "⏳ جارٍ تحليل بياناتك وبناء سيرتك الذاتية، لحظات من فضلك..."
+        "تمام كتير، وصلتني كل المعلومات اللازمة ✅ جارٍ بناء سيرتك الذاتية، لحظات من فضلك..."
         if language == "ar"
-        else "⏳ Analyzing your details and building your CV, one moment..."
+        else "✅ Got everything I need! Building your CV now, one moment..."
     )
-    await callback.message.answer(processing_text)
+    await message.answer(processing_text)
 
     await enqueue(
         settings.queue_cv_generation,
         {
-            "chat_id": callback.message.chat.id,
-            "user_id": callback.from_user.id,
-            "raw_text": raw_text,
-            "language": language,
+            "chat_id": message.chat.id,
+            "user_id": message.from_user.id if message.from_user else message.chat.id,
+            "cv_data": result,
         },
     )
+
+
+@user_router.message(StateFilter(CvBuildStates.waiting_for_more_info), F.text)
+async def handle_more_info_reply(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    raw_text = data.get("raw_text", "")
+    language = data.get("language", "ar")
+    style = data.get("style", "enhanced")
+    attempts = data.get("attempts", 0)
+
+    combined_text = f"{raw_text}\n{message.text}".strip()
+    await state.update_data(raw_text=combined_text)
+
+    await _run_completeness_check(message, state, combined_text, language, style, attempts=attempts)
+
+
+@user_router.message(StateFilter(CvBuildStates.waiting_for_more_info))
+async def handle_more_info_wrong_type(message: Message) -> None:
+    await message.answer("✍️ من فضلك أرسل المعلومات الناقصة كنص.")
 
 
 # =====================================================================
 # ب. عرض شراء نسخة DOCX
 # =====================================================================
 
-@user_router.message(StateFilter(CvLanguageStates.waiting_for_language))
+@user_router.message(StateFilter(CvBuildStates.waiting_for_language))
 async def handle_language_choice_fallback(message: Message) -> None:
     await message.answer(
         "⬆️ من فضلك اختر لغة السيرة الذاتية بالضغط على أحد الزرين أعلاه.\n"

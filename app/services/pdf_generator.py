@@ -17,11 +17,14 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-# ملاحظة: خط Cairo يدعم العربية والحروف اللاتينية معاً، لذا نستخدمه للغتين
+# ملاحظة: خط Noto Sans Arabic يدعم العربية والحروف اللاتينية معاً، لذا نستخدمه للغتين
 # إن كان متوفراً في assets/fonts/. إن لم يتوفر، نعود لخط Helvetica الافتراضي
 # (يعمل جيداً مع الإنجليزية فقط - يُنصح بشدة بإضافة الخط لدعم العربية).
-_ARABIC_FONT_NAME = "Cairo"
-_ARABIC_FONT_PATH = "./assets/fonts/Cairo-Regular.ttf"
+# تم اختيار Noto Sans Arabic بدلاً من Cairo لأن Cairo ينقصه بعض أشكال الحروف
+# العربية (Presentation Forms) التي تحتاجها مكتبة arabic_reshaper مع reportlab،
+# مما كان يسبب ظهور مربعات فارغة (tofu) بدل بعض الحروف.
+_ARABIC_FONT_NAME = "NotoSansArabic"
+_ARABIC_FONT_PATH = "./assets/fonts/NotoSansArabic-Regular.ttf"
 _font_registered = False
 
 # تسميات الأقسام الثابتة بكل لغة

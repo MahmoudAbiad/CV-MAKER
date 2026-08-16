@@ -8,6 +8,16 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from app.config import settings
 
 
+def cv_style_keyboard() -> InlineKeyboardMarkup:
+    """يسأل المستخدم إن كان يفضّل نصه كما كتبه (مع تنظيم بسيط) أو يريد لمسة احترافية من الذكاء الاصطناعي."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🖊️ خليها متل ما كتبتها بالضبط", callback_data="cv_style:raw")],
+            [InlineKeyboardButton(text="✨ خلّي الذكاء الاصطناعي يلمّعها ويطوّرها", callback_data="cv_style:enhanced")],
+        ]
+    )
+
+
 def cv_language_keyboard() -> InlineKeyboardMarkup:
     """يسأل المستخدم عن لغة السيرة الذاتية الناتجة قبل إرسالها لـ Gemini."""
     return InlineKeyboardMarkup(
