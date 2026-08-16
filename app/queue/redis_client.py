@@ -20,8 +20,8 @@ def get_redis() -> aioredis.Redis:
         _redis = aioredis.from_url(
             settings.upstash_redis_url,
             decode_responses=True,
-            socket_timeout=10,
-            socket_connect_timeout=10,
+            socket_timeout=35,
+            socket_connect_timeout=15,
         )
     return _redis
 
@@ -39,7 +39,7 @@ async def enqueue(queue_name: str, payload: dict[str, Any]) -> None:
     await r.lpush(queue_name, json.dumps(payload, ensure_ascii=False))
 
 
-async def dequeue_blocking(queue_name: str, timeout: int = 5) -> dict[str, Any] | None:
+async def dequeue_blocking(queue_name: str, timeout: int = 30) -> dict[str, Any] | None:
     """
     سحب مهمة من بداية الطابور مع الحظر (Blocking) حتى مهلة محددة.
     تُستخدم داخل حلقة العامل (Worker Loop).

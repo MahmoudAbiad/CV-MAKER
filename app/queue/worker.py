@@ -98,6 +98,10 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
 
     # إحالة الإيصال إلى مجموعة الأدمن للمراجعة النهائية
     payment = await db.get_payment(payment_id)
+    if payment is None:
+        logger.error("لم يتم العثور على سجل الدفعة %s", payment_id)
+        return
+
     caption = (
         f"🧾 *طلب دفع جديد* #{payment_id}\n"
         f"👤 معرّف المستخدم: `{user_id}`\n"
@@ -160,7 +164,7 @@ _HANDLERS = {
 async def _consume_queue(bot: Bot, queue_name: str, kind: str) -> None:
     while True:
         try:
-            payload = await dequeue_blocking(queue_name, timeout=5)
+            payload = await dequeue_blocking(queue_name, timeout=30)
             if payload is None:
                 continue
             await _HANDLERS[kind](bot, payload)
@@ -168,7 +172,7 @@ async def _consume_queue(bot: Bot, queue_name: str, kind: str) -> None:
             raise
         except Exception:
             logger.exception("خطأ غير متوقع في عامل الطابور %s", queue_name)
-            await asyncio.sleep(1)
+            await asyncio.sleep(5)
 
 
 async def start_workers(bot: Bot) -> list[asyncio.Task]:
