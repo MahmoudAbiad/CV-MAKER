@@ -38,7 +38,14 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
         await bot.send_message(chat_id, "⚠️ حدث خطأ أثناء توليد ملف PDF. حاول مرة أخرى.")
         return
 
-    cv_id = await db.insert_cv_record(user_id=user_id, parsed_json=cv_data, fmt="pdf")
+    # نحاول حفظ السجل بقاعدة البيانات، لكن لا نسمح لفشل الحفظ بمنع المستخدم
+    # من استلام الملف الذي تم توليده بنجاح فعلاً (كانا سابقاً مرتبطين، فإذا
+    # فشل insert_cv_record كان المستخدم لا يحصل على PDF نهائياً رغم توليده).
+    cv_id: int | None = None
+    try:
+        cv_id = await db.insert_cv_record(user_id=user_id, parsed_json=cv_data, fmt="pdf")
+    except Exception:
+        logger.exception("فشل حفظ سجل السيرة الذاتية بقاعدة البيانات للمستخدم %s", user_id)
 
     file_name = f"CV_{cv_data.get('full_name', 'candidate').replace(' ', '_')}.pdf"
     pdf_caption = (
@@ -46,17 +53,31 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
         if language == "ar"
         else "✅ Here is your free PDF CV."
     )
-    docx_prompt = (
-        "هل ترغب أيضاً بنسخة Word قابلة للتعديل يمكنك تحديثها بنفسك لاحقاً؟"
-        if language == "ar"
-        else "Would you also like an editable Word version you can update yourself later?"
-    )
     await bot.send_document(
         chat_id=chat_id,
         document=BufferedInputFile(pdf_bytes, filename=file_name),
         caption=pdf_caption,
     )
-    await bot.send_message(chat_id, docx_prompt, reply_markup=docx_offer_keyboard(cv_id))
+
+    if cv_id is not None:
+        docx_prompt = (
+            "هل ترغب أيضاً بنسخة Word قابلة للتعديل يمكنك تحديثها بنفسك لاحقاً؟"
+            if language == "ar"
+            else "Would you also like an editable Word version you can update yourself later?"
+        )
+        await bot.send_message(chat_id, docx_prompt, reply_markup=docx_offer_keyboard(cv_id))
+    else:
+        # لم نتمكن من حفظ السجل، فلا يوجد cv_id لعرض زر طلب نسخة Word عليه
+        # (الزر يحتاج المعرّف لاحقاً عند معالجة الدفع). نُعلم المستخدم بدل
+        # عرض زر سيفشل عند الضغط عليه.
+        retry_msg = (
+            "⚠️ تم إرسال ملف PDF بنجاح، لكن حدث خطأ مؤقت أثناء حفظ سجلك. "
+            "إذا رغبت بنسخة Word لاحقاً تواصل مع الدعم."
+            if language == "ar"
+            else "⚠️ Your PDF was sent successfully, but we hit a temporary "
+            "error saving your record. Contact support if you'd like a Word version later."
+        )
+        await bot.send_message(chat_id, retry_msg)
 
 
 async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
@@ -130,7 +151,12 @@ async def _process_docx_generation(bot: Bot, payload: dict[str, Any]) -> None:
         await bot.send_message(user_id, "⚠️ حدث خطأ أثناء توليد ملف Word. تواصل مع الدعم من فضلك.")
         return
 
-    await db.insert_cv_record(user_id=user_id, parsed_json=cv_record["parsed_json"], fmt="docx")
+    try:
+        await db.insert_cv_record(user_id=user_id, parsed_json=cv_record["parsed_json"], fmt="docx")
+    except Exception:
+        # نفس المبدأ: فشل تسجيل النسخة بقاعدة البيانات لا يجب أن يمنع تسليم
+        # الملف الذي تم توليده بنجاح وسبق أن دفع المستخدم مقابله.
+        logger.exception("فشل حفظ سجل نسخة DOCX بقاعدة البيانات للمستخدم %s", user_id)
 
     language = cv_record["parsed_json"].get("_language", "ar")
     file_name = f"CV_{cv_record['parsed_json'].get('full_name', 'candidate').replace(' ', '_')}.docx"

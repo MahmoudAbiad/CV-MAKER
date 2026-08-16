@@ -37,7 +37,13 @@ _CV_CHECK_SCHEMA: dict[str, Any] = {
             "description": "رسالة ودّية للمستخدم تطلب المعلومات الناقصة تحديداً؛ نص فارغ إن كانت الحالة complete",
         },
         "full_name": {"type": "string"},
-        "title": {"type": "string", "description": "المسمى الوظيفي المقترح"},
+        "title": {
+            "type": "string",
+            "description": (
+                "المسمى الوظيفي المقترح - عبارة قصيرة جداً (أقل من 8 كلمات) فقط، بدون أي شرح أو "
+                "تعليق. اتركه فارغاً إن لم تكن واثقاً"
+            ),
+        },
         "summary": {"type": "string", "description": "ملخص احترافي قصير"},
         "contact": {
             "type": "object",
@@ -175,8 +181,28 @@ _FORCE_COMPLETE_SUFFIX = {
 }
 
 _FINAL_INSTRUCTION = {
-    "ar": "أرجع النتيجة حصراً وفق مخطط JSON المحدد دون أي نص إضافي خارج الحقول.",
-    "en": "Return the result strictly following the given JSON schema, with no extra text outside the fields.",
+    "ar": (
+        "أرجع النتيجة حصراً وفق مخطط JSON المحدد دون أي نص إضافي خارج الحقول. "
+        "تحذير مهم جداً: كل حقل نصي (مثل title و full_name وغيرها) يجب أن يحتوي فقط على "
+        "المحتوى النهائي النظيف الجاهز للعرض للمستخدم مباشرة — ممنوع منعاً باتاً كتابة أي "
+        "شرح، ملاحظة مراجعة، تعليق على مدى التزامك بالتعليمات، أو أي كلام عن العملية نفسها "
+        "داخل قيمة أي حقل (مثال على ما هو ممنوع تماماً: \"Format check done\"، \"Title set "
+        "to...\"، \"Corrected Value\"، \"Code Revision\"، إلخ). حقل title تحديداً يجب أن يكون "
+        "عبارة قصيرة جداً (بضع كلمات فقط، أقل من 8 كلمات) تصف المسمى الوظيفي أو الوضع "
+        "الدراسي/المهني، وإن لم تتوفر معلومة كافية لاستنتاجه بثقة اتركه نصاً فارغاً \"\" بدل "
+        "كتابة أي شيء آخر."
+    ),
+    "en": (
+        "Return the result strictly following the given JSON schema, with no extra text outside the "
+        "fields. Very important warning: every text field (such as title, full_name, etc.) must contain "
+        "ONLY the final, clean content ready to be shown directly to the user — it is strictly forbidden "
+        "to write any explanation, review note, commentary about your own compliance with instructions, "
+        "or any talk about the process itself inside a field's value (examples of what is strictly "
+        "forbidden: \"Format check done\", \"Title set to...\", \"Corrected Value\", \"Code Revision\", "
+        "etc.). The title field specifically must be a very short phrase (a few words, under 8 words) "
+        "describing the job title or academic/professional status, and if there isn't enough information "
+        "to confidently infer it, leave it as an empty string \"\" instead of writing anything else."
+    ),
 }
 
 
@@ -192,6 +218,39 @@ def _build_system_prompt(language: str, style: str, force_complete: bool) -> str
         parts.append(_FORCE_COMPLETE_SUFFIX.get(language, _FORCE_COMPLETE_SUFFIX["ar"]))
     parts.append(_FINAL_INSTRUCTION.get(language, _FINAL_INSTRUCTION["ar"]))
     return "\n\n".join(parts)
+
+
+def _clean_short_field(value: Any, max_len: int = 80) -> Any:
+    """
+    طبقة حماية إضافية على مستوى الكود (بغض النظر عن مدى التزام النموذج بالبرومبت):
+    تُطبَّق على الحقول القصيرة (سطر واحد متوقع، مثل title وfull_name) لضمان عدم تسرّب
+    أي نص تفسيري/تعليقات مراجعة داخلية من النموذج إلى الناتج النهائي الظاهر للمستخدم.
+    - تأخذ أول سطر فقط
+    - تقصّ الطول عند الحد الأقصى
+    - ترفض القيمة كلياً (ترجعها فارغة) إذا بدت أقرب لنص تفسيري (علامات ':' أو '.' متكررة)
+    """
+    if not isinstance(value, str):
+        return value
+    value = value.strip().splitlines()[0].strip() if value.strip() else ""
+    if value.count(":") >= 2 or value.count(".") >= 2 or len(value) > max_len:
+        logger.warning("تم تجاهل حقل قصير مشبوه من مخرجات Gemini: %r", value[:120])
+        return ""
+    return value
+
+
+def _sanitize_cv_result(result: dict[str, Any]) -> dict[str, Any]:
+    """ينظّف الحقول المتوقع أن تكون قصيرة قبل استخدامها في توليد PDF/DOCX."""
+    if "title" in result:
+        result["title"] = _clean_short_field(result["title"], max_len=60)
+    if "full_name" in result:
+        cleaned_name = _clean_short_field(result["full_name"], max_len=80)
+        # الاسم الكامل حقل إلزامي لبناء السيرة الذاتية، فلا نفرغه حتى لو بدا مشبوهاً قليلاً؛
+        # نكتفي بأخذ أول سطر وقصّ الطول دون رفضه بالكامل كما نفعل مع title
+        if not cleaned_name:
+            first_line = str(result["full_name"]).strip().splitlines()[0].strip()
+            cleaned_name = first_line[:80].rsplit(" ", 1)[0].strip() if len(first_line) > 80 else first_line
+        result["full_name"] = cleaned_name
+    return result
 
 
 async def _call_gemini_with_retry(
@@ -267,6 +326,7 @@ async def check_and_extract_cv(
         result["status"] = "complete"
 
     if result.get("status") == "complete":
+        result = _sanitize_cv_result(result)
         # نضمّن اللغة والأسلوب داخل البيانات نفسها كي يستخدمهما مولّدا PDF وDOCX لاحقاً
         # دون الحاجة لتعديل مخطط قاعدة البيانات
         result["_language"] = language

@@ -5,16 +5,45 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import libsql_client
+from libsql_client.client import LibsqlError
+from libsql_client.http import HttpClient
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ----------------------------------------------------------------------
+# إصلاح خلل معروف في libsql-client==0.3.1:
+# عندما يرجّع Turso استجابة HTTP 200 لكن جسمها يحتوي "error" بدل "result"
+# (يحصل هذا مثلاً عند فشل قيد Foreign Key)، المكتبة تحاول الوصول مباشرة
+# إلى response["result"] بدون أي تحقق، فيظهر KeyError غامض بدل رسالة الخطأ
+# الحقيقية القادمة من قاعدة البيانات. هذا الباتش يعيد فحص الاستجابة قبل
+# تمريرها للمكتبة، ويرفع LibsqlError بنفس رسالة/كود الخطأ الحقيقيين إذا وُجد
+# مفتاح "error" بدل "result"، حتى نقدر نمسك الاستثناء الصحيح ونعرف سببه.
+_original_send = HttpClient._send
+
+
+async def _patched_send(self: HttpClient, method: str, path: str, request_body: Any) -> Any:
+    response = await _original_send(self, method, path, request_body)
+    if isinstance(response, dict) and "result" not in response and "error" in response:
+        err = response["error"] or {}
+        message = err.get("message", "خطأ غير معروف من قاعدة البيانات (استجابة بدون result)")
+        code = err.get("code", "UNKNOWN")
+        raise LibsqlError(message, code)
+    return response
+
+
+HttpClient._send = _patched_send  # type: ignore[method-assign]
 
 
 class Database:
@@ -56,10 +85,24 @@ class Database:
             [user_id, username, full_name, _now()],
         )
 
+    async def ensure_user_exists(self, user_id: int) -> None:
+        """يضمن وجود صف للمستخدم بجدول users دون التأثير على username/full_name
+        الموجودين مسبقاً. يُستخدم كإجراء احترازي قبل أي إدراج يعتمد على قيد
+        Foreign Key بجدول users، تحسّباً لفشل UserRegistrationMiddleware."""
+        await self.client.execute(
+            """
+            INSERT INTO users (user_id, created_at)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO NOTHING
+            """,
+            [user_id, _now()],
+        )
+
     # ------------------------------------------------------------------
     # السير الذاتية
     # ------------------------------------------------------------------
     async def insert_cv_record(self, user_id: int, parsed_json: dict[str, Any], fmt: str) -> int:
+        await self.ensure_user_exists(user_id)
         rs = await self.client.execute(
             """
             INSERT INTO cv_records (user_id, parsed_json, format, created_at)
@@ -96,6 +139,7 @@ class Database:
         receipt_file_id: str,
         cv_record_id: int | None,
     ) -> int:
+        await self.ensure_user_exists(user_id)
         now = _now()
         rs = await self.client.execute(
             """
