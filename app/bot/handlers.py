@@ -8,7 +8,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -31,11 +30,7 @@ from app.bot.keyboards import (
     payment_instructions_keyboard,
 )
 from app.config import settings
-from app.queue.worker import (
-    _process_cv_generation,
-    _process_docx_generation,
-    _process_receipt_screening,
-)
+from app.queue.redis_client import enqueue
 from app.services.db import db
 
 logger = logging.getLogger(__name__)
@@ -123,17 +118,14 @@ async def handle_cv_language_choice(callback: CallbackQuery, state: FSMContext) 
     )
     await callback.message.answer(processing_text)
 
-    # تشغيل المعالجة مباشرة في الخلفية دون انتظار وسيط Redis
-    asyncio.create_task(
-        _process_cv_generation(
-            bot=callback.bot,
-            payload={
-                "chat_id": callback.message.chat.id,
-                "user_id": callback.from_user.id,
-                "raw_text": raw_text,
-                "language": language,
-            },
-        )
+    await enqueue(
+        settings.queue_cv_generation,
+        {
+            "chat_id": callback.message.chat.id,
+            "user_id": callback.from_user.id,
+            "raw_text": raw_text,
+            "language": language,
+        },
     )
 
 
@@ -208,17 +200,14 @@ async def handle_receipt_photo(message: Message, state: FSMContext) -> None:
 
     await message.answer("✅ تم استلام الإيصال، جارٍ التحقق منه... سنُعلمك فور المراجعة.")
 
-    # تشغيل فحص الإيصال مباشرة في الخلفية
-    asyncio.create_task(
-        _process_receipt_screening(
-            bot=message.bot,
-            payload={
-                "payment_id": payment_id,
-                "chat_id": message.chat.id,
-                "user_id": message.from_user.id,
-                "receipt_file_id": receipt_file_id,
-            },
-        )
+    await enqueue(
+        settings.queue_receipt_screening,
+        {
+            "payment_id": payment_id,
+            "chat_id": message.chat.id,
+            "user_id": message.from_user.id,
+            "receipt_file_id": receipt_file_id,
+        },
     )
 
 
@@ -247,16 +236,13 @@ async def handle_admin_approve(callback: CallbackQuery) -> None:
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(f"✅ تمت الموافقة على الدفعة #{payment_id} - جارٍ توليد ملف Word للمستخدم.")
 
-    # تشغيل توليد ملف DOCX مباشرة في الخلفية
-    asyncio.create_task(
-        _process_docx_generation(
-            bot=callback.bot,
-            payload={
-                "payment_id": payment_id,
-                "user_id": payment["user_id"],
-                "cv_record_id": payment["cv_record_id"],
-            },
-        )
+    await enqueue(
+        settings.queue_docx_generation,
+        {
+            "payment_id": payment_id,
+            "user_id": payment["user_id"],
+            "cv_record_id": payment["cv_record_id"],
+        },
     )
 
 
@@ -347,6 +333,7 @@ async def handle_admin_broadcast_send(message: Message, state: FSMContext) -> No
     status_msg = await message.answer(f"📢 جارٍ الإرسال إلى {len(user_ids)} مستخدم...")
 
     from app.main import bot  # استيراد مؤجل لتفادي الاستيراد الدائري
+    import asyncio
 
     sent, failed = 0, 0
     for uid in user_ids:
