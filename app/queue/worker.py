@@ -27,9 +27,10 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
     chat_id = payload["chat_id"]
     user_id = payload["user_id"]
     raw_text = payload["raw_text"]
+    language = payload.get("language", "ar")
 
     try:
-        cv_data = await gemini_service.extract_cv_from_text(raw_text)
+        cv_data = await gemini_service.extract_cv_from_text(raw_text, language=language)
     except Exception:
         logger.exception("فشل استخراج بيانات السيرة الذاتية عبر Gemini")
         await bot.send_message(
@@ -48,16 +49,22 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
     cv_id = await db.insert_cv_record(user_id=user_id, parsed_json=cv_data, fmt="pdf")
 
     file_name = f"CV_{cv_data.get('full_name', 'candidate').replace(' ', '_')}.pdf"
+    pdf_caption = (
+        "✅ هذه نسختك المجانية من السيرة الذاتية بصيغة PDF."
+        if language == "ar"
+        else "✅ Here is your free PDF CV."
+    )
+    docx_prompt = (
+        "هل ترغب أيضاً بنسخة Word قابلة للتعديل يمكنك تحديثها بنفسك لاحقاً؟"
+        if language == "ar"
+        else "Would you also like an editable Word version you can update yourself later?"
+    )
     await bot.send_document(
         chat_id=chat_id,
         document=BufferedInputFile(pdf_bytes, filename=file_name),
-        caption="✅ هذه نسختك المجانية من السيرة الذاتية بصيغة PDF.",
+        caption=pdf_caption,
     )
-    await bot.send_message(
-        chat_id,
-        "هل ترغب أيضاً بنسخة Word قابلة للتعديل يمكنك تحديثها بنفسك لاحقاً؟",
-        reply_markup=docx_offer_keyboard(cv_id),
-    )
+    await bot.send_message(chat_id, docx_prompt, reply_markup=docx_offer_keyboard(cv_id))
 
 
 async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
@@ -129,11 +136,17 @@ async def _process_docx_generation(bot: Bot, payload: dict[str, Any]) -> None:
 
     await db.insert_cv_record(user_id=user_id, parsed_json=cv_record["parsed_json"], fmt="docx")
 
+    language = cv_record["parsed_json"].get("_language", "ar")
     file_name = f"CV_{cv_record['parsed_json'].get('full_name', 'candidate').replace(' ', '_')}.docx"
+    docx_caption = (
+        "🎉 تفضّل نسختك القابلة للتعديل بصيغة Word!"
+        if language == "ar"
+        else "🎉 Here is your editable Word version!"
+    )
     await bot.send_document(
         chat_id=user_id,
         document=BufferedInputFile(docx_bytes, filename=file_name),
-        caption="🎉 تفضّل نسختك القابلة للتعديل بصيغة Word!",
+        caption=docx_caption,
     )
 
 

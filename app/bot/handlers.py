@@ -25,6 +25,7 @@ from aiogram.types import (
 from app.bot.keyboards import (
     admin_panel_keyboard,
     admin_review_keyboard,
+    cv_language_keyboard,
     docx_offer_keyboard,
     payment_instructions_keyboard,
 )
@@ -36,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 user_router = Router(name="user")
 admin_router = Router(name="admin")
+
+
+class CvLanguageStates(StatesGroup):
+    waiting_for_language = State()
 
 
 class PaymentStates(StatesGroup):
@@ -57,8 +62,9 @@ class RejectStates(StatesGroup):
 WELCOME_TEXT = (
     "👋 أهلاً بك في بوت إنشاء السير الذاتية الاحترافية!\n\n"
     "فقط أرسل لي نبذة عن خبراتك ودراستك ومهاراتك بأسلوبك الخاص "
-    "(حتى لو باللهجة العامية)، وسأقوم بتحويلها إلى سيرة ذاتية احترافية "
-    "بصيغة PDF مجاناً خلال ثوانٍ 📄✨\n\n"
+    "(حتى لو باللهجة العامية، وسواء كتبت بالعربية أو الإنجليزية)، "
+    "وسأسألك بعدها عن لغة السيرة الذاتية الناتجة (عربي / English) "
+    "ثم أحوّلها إلى سيرة ذاتية احترافية بصيغة PDF مجاناً خلال ثوانٍ 📄✨\n\n"
     "مثال: \"أنا محمد، عندي خبرة 3 سنين مبيعات بشركة اتصالات، بعرف "
     "إدارة فريق واستخدام برامج CRM، تخرجت من كلية إدارة أعمال 2020\""
 )
@@ -69,8 +75,8 @@ async def cmd_start(message: Message) -> None:
     await message.answer(WELCOME_TEXT)
 
 
-@user_router.message(F.text, ~F.text.startswith("/"))
-async def handle_free_text_cv(message: Message) -> None:
+@user_router.message(F.text, ~F.text.startswith("/"), StateFilter(None))
+async def handle_free_text_cv(message: Message, state: FSMContext) -> None:
     if not message.text or len(message.text.strip()) < 15:
         await message.answer(
             "🤔 النص قصير جداً لبناء سيرة ذاتية متكاملة. "
@@ -78,15 +84,47 @@ async def handle_free_text_cv(message: Message) -> None:
         )
         return
 
-    processing_msg = await message.answer("⏳ جارٍ تحليل بياناتك وبناء سيرتك الذاتية، لحظات من فضلك...")
+    # نخزّن النص المُرسل مؤقتاً وننتظر اختيار المستخدم للغة السيرة الذاتية
+    await state.update_data(raw_text=message.text)
+    await state.set_state(CvLanguageStates.waiting_for_language)
+
+    await message.answer(
+        "🌐 باي لغة تحب تكون سيرتك الذاتية؟\n"
+        "In which language would you like your CV?",
+        reply_markup=cv_language_keyboard(),
+    )
+
+
+@user_router.callback_query(
+    StateFilter(CvLanguageStates.waiting_for_language), F.data.startswith("cv_lang:")
+)
+async def handle_cv_language_choice(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    language = callback.data.split(":")[1]  # "ar" أو "en"
+
+    data = await state.get_data()
+    raw_text = data.get("raw_text")
+    await state.clear()
+
+    if not raw_text:
+        await callback.message.answer("⚠️ انتهت صلاحية الجلسة، من فضلك أعد إرسال وصف خبراتك من جديد.")
+        return
+
+    await callback.message.edit_reply_markup(reply_markup=None)
+    processing_text = (
+        "⏳ جارٍ تحليل بياناتك وبناء سيرتك الذاتية، لحظات من فضلك..."
+        if language == "ar"
+        else "⏳ Analyzing your details and building your CV, one moment..."
+    )
+    await callback.message.answer(processing_text)
 
     await enqueue(
         settings.queue_cv_generation,
         {
-            "chat_id": message.chat.id,
-            "user_id": message.from_user.id,
-            "raw_text": message.text,
-            "processing_message_id": processing_msg.message_id,
+            "chat_id": callback.message.chat.id,
+            "user_id": callback.from_user.id,
+            "raw_text": raw_text,
+            "language": language,
         },
     )
 
@@ -94,6 +132,14 @@ async def handle_free_text_cv(message: Message) -> None:
 # =====================================================================
 # ب. عرض شراء نسخة DOCX
 # =====================================================================
+
+@user_router.message(StateFilter(CvLanguageStates.waiting_for_language))
+async def handle_language_choice_fallback(message: Message) -> None:
+    await message.answer(
+        "⬆️ من فضلك اختر لغة السيرة الذاتية بالضغط على أحد الزرين أعلاه.\n"
+        "⬆️ Please pick the CV language using one of the buttons above."
+    )
+
 
 @user_router.callback_query(F.data == "skip_docx")
 async def handle_skip_docx(callback: CallbackQuery) -> None:

@@ -64,12 +64,29 @@ _CV_JSON_SCHEMA: dict[str, Any] = {
     "required": ["full_name", "summary", "experience", "skills"],
 }
 
-_SYSTEM_PROMPT = (
-    "أنت خبير موارد بشرية متخصص في كتابة السير الذاتية الاحترافية. "
-    "سيصلك نص عشوائي بالعامية أو الفصحى يصف خبرة شخص ما. "
-    "مهمتك: استخرج المعلومات وأعد صياغتها بأسلوب احترافي يستخدم أفعال حركية قوية "
-    "(مثل: قاد، طوّر، حسّن، نفّذ)، وأرجع النتيجة حصراً وفق مخطط JSON المحدد دون أي نص إضافي."
-)
+_SYSTEM_PROMPTS = {
+    "ar": (
+        "أنت خبير موارد بشرية متخصص في كتابة السير الذاتية الاحترافية. "
+        "سيصلك نص عشوائي (قد يكون بالعامية أو الفصحى أو حتى بالإنجليزية) يصف خبرة شخص ما. "
+        "مهمتك: استخرج المعلومات وأعد صياغة كل الحقول النصية باللغة العربية الفصحى حصراً، "
+        "بأسلوب احترافي يستخدم أفعال حركية قوية (مثل: قاد، طوّر، حسّن، نفّذ). "
+        "حتى لو كان النص الأصلي بالإنجليزية، ترجم المحتوى وأعد صياغته بالعربية. "
+        "أرجع النتيجة حصراً وفق مخطط JSON المحدد دون أي نص إضافي."
+    ),
+    "en": (
+        "You are a professional HR expert specializing in writing polished resumes/CVs. "
+        "You will receive an unstructured, possibly casual or dialect-heavy text (which may even be "
+        "written in Arabic) describing someone's background. "
+        "Your task: extract the information and rewrite every text field in professional, fluent English "
+        "using strong action verbs (e.g., led, developed, improved, implemented). "
+        "Even if the source text is in Arabic, translate and rewrite the content in English. "
+        "Return the result strictly following the given JSON schema, with no extra text."
+    ),
+}
+
+
+def _system_prompt(language: str) -> str:
+    return _SYSTEM_PROMPTS.get(language, _SYSTEM_PROMPTS["ar"])
 
 
 async def _call_gemini_with_retry(
@@ -103,11 +120,17 @@ async def _call_gemini_with_retry(
     raise RuntimeError(f"فشل الاتصال بـ Gemini بعد {max_retries} محاولات: {last_error}")
 
 
-async def extract_cv_from_text(raw_text: str) -> dict[str, Any]:
-    """يرسل نص المستخدم الخام إلى Gemini ويستقبل بيانات سيرة ذاتية مهيكلة."""
+async def extract_cv_from_text(raw_text: str, language: str = "ar") -> dict[str, Any]:
+    """
+    يرسل نص المستخدم الخام إلى Gemini ويستقبل بيانات سيرة ذاتية مهيكلة.
+    language: "ar" أو "en" - يحدد لغة محتوى السيرة الذاتية الناتجة (وليس بالضرورة لغة النص المُدخل).
+    """
+    if language not in ("ar", "en"):
+        language = "ar"
+
     url = f"{_GEMINI_BASE}/{settings.gemini_text_model}:generateContent?key={settings.gemini_api_key}"
     body = {
-        "system_instruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
+        "system_instruction": {"parts": [{"text": _system_prompt(language)}]},
         "contents": [{"role": "user", "parts": [{"text": raw_text}]}],
         "generationConfig": {
             "response_mime_type": "application/json",
@@ -117,7 +140,12 @@ async def extract_cv_from_text(raw_text: str) -> dict[str, Any]:
     }
     data = await _call_gemini_with_retry(url, body)
     text_part = data["candidates"][0]["content"]["parts"][0]["text"]
-    return json.loads(text_part)
+    cv_data: dict[str, Any] = json.loads(text_part)
+
+    # نضمّن اللغة داخل البيانات نفسها كي يستخدمها مولّدا PDF وDOCX لاحقاً
+    # لتحديد اتجاه النص (RTL/LTR) وعناوين الأقسام، دون الحاجة لتعديل مخطط قاعدة البيانات
+    cv_data["_language"] = language
+    return cv_data
 
 
 async def verify_payment_receipt(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict[str, Any]:

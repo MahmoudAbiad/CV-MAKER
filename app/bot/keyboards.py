@@ -8,6 +8,18 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from app.config import settings
 
 
+def cv_language_keyboard() -> InlineKeyboardMarkup:
+    """يسأل المستخدم عن لغة السيرة الذاتية الناتجة قبل إرسالها لـ Gemini."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🇸🇦 عربي", callback_data="cv_lang:ar"),
+                InlineKeyboardButton(text="🇬🇧 English", callback_data="cv_lang:en"),
+            ]
+        ]
+    )
+
+
 def docx_offer_keyboard(cv_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
