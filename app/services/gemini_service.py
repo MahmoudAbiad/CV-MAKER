@@ -35,34 +35,36 @@ _CV_CHECK_SCHEMA: dict[str, Any] = {
         "question": {
             "type": "object",
             "description": (
-                "السؤال الوحيد الأهم عن المعلومة الناقصة؛ اتركه ككائن فارغ {} إن كانت الحالة complete. "
+                "السؤال التكميلي الوحيد عند النقص. اتركه كائناً فارغاً {} تماماً إذا كانت الحالة complete. "
                 "لا تطرح أكثر من سؤال واحد بكل مرة."
             ),
             "properties": {
                 "text": {
                     "type": "string",
-                    "description": "نص السؤال بلهجة عربية عامية سورية محترمة، قصير ومباشر",
+                    "description": (
+                        "جملة استفهامية واحدة فقط ومباشرة بدون أي مقدمات أو تلخيص لكلام المستخدم "
+                        "(أقل من 20 كلمة، عامية سورية مهذبة ولطيفة)."
+                    ),
                 },
                 "question_type": {
                     "type": "string",
                     "enum": ["choice", "open"],
                     "description": (
-                        "choice فقط إذا كانت الإجابة تنحصر منطقياً بخيارات محدودة وواضحة (2-4 خيارات) "
-                        "مثل نعم/لا أو الاختيار بين فئات معروفة. open لأي سؤال يحتاج إجابة حرة "
-                        "(اسم، تفاصيل خبرة، تواريخ، أرقام تواصل...)"
+                        "choice فقط للأسئلة المحدودة والواضحة (2-3 خيارات مثل: نعم/لا). "
+                        "open لأي بيانات تفصيلية (اسم، شركة، جامعة، وسيلة تواصل، مهارات)."
                     ),
                 },
                 "options": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "خيارات قصيرة جداً (كلمة أو كلمتين) تُعرض كأزرار؛ فقط عندما question_type=choice، بين 2 و4 خيارات",
+                    "description": "خيارات موجزة جداً (كلمة أو كلمتين للزر) فقط عندما question_type=choice، بين 2 و4 خيارات",
                 },
             },
         },
         "follow_up_message": {
             "type": "string",
             "description": (
-                "احتياطي فقط: نفس نص question.text تقريباً، يُستخدم إذا تعذّر عرض الأزرار. "
+                "احتياطي فقط: نسخة مطابقة تماماً لنص question.text. "
                 "اتركه فارغاً إن كانت الحالة complete."
             ),
         },
@@ -172,55 +174,43 @@ _STYLE_INSTRUCTIONS = {
 # معايير اكتمال المعلومات + أسلوب طرح السؤال التكميلي على المستخدم[cite: 1]
 _COMPLETENESS_INSTRUCTIONS = {
     "ar": (
-        "بالإضافة لما سبق، أنت مسؤول عن التحقق من اكتمال المعلومات الأساسية اللازمة لبناء سيرة "
-        "ذاتية مفيدة ومقنعة فعلاً (وليست شبه فارغة)، وهي:\n"
-        "1) الاسم الكامل للمستخدم\n"
-        "2) وسيلة تواصل واحدة على الأقل (رقم هاتف أو إيميل)\n"
-        "3) عنصر واحد على الأقل بتفاصيل حقيقية من (خبرة عملية) أو (تعليم/دراسة)، ويجب أن يتضمن "
-        "هذا العنصر اسم الجهة (شركة/جامعة) والفترة الزمنية التقريبية (سنة أو مدة)، وليس مجرد "
-        "مسمى عام بلا سياق\n"
-        "4) قائمة مهارات لا تقل عن ثلاث مهارات محددة (وليست عامة جداً مثل \"مهارات جيدة\")\n\n"
-        "إن كان أي من هذه العناصر ناقصاً أو غامضاً جداً، اجعل status يساوي \"needs_more_info\". "
-        "اختر العنصر الناقص الأهم فقط (لا تسأل عن أكثر من شيء واحد بكل مرة) واملأ حقل question:\n"
-        "- text: سؤال واحد قصير ومباشر بلهجة عربية عامية سورية محترمة (بدون أي ألفاظ غير لائقة، "
-        "وبأسلوب لطيف كأنك موظف استقبال محترف)، لا تكرر السؤال عن معلومة أرسلها المستخدم فعلاً\n"
-        "- question_type: اجعلها \"choice\" فقط إذا كانت الإجابة المنطقية تنحصر بخيارات واضحة "
-        "ومحدودة (مثال: \"هل عندك خبرة عمل سابقة؟\" -> خيارات [\"عندي خبرة\", \"ما عندي خبرة بعد\"])، "
-        "وإلا اجعلها \"open\" (مثال: طلب الاسم، أو تفاصيل الخبرة، أو رقم الهاتف/الإيميل، كلها open)\n"
-        "- options: فقط عند choice، من 2 إلى 4 خيارات قصيرة جداً (كلمة أو كلمتين لكل خيار)\n"
-        "املأ follow_up_message بنفس نص question.text تقريباً كنسخة احتياطية.\n\n"
-        "أما إن كانت جميع العناصر الأربعة الأساسية متوفرة، اجعل status يساوي \"complete\"، اترك "
-        "question كائناً فارغاً {} وfollow_up_message نصاً فارغاً \"\"، واستخرج بقية الحقول "
-        "(full_name, title, summary, contact, experience, education, skills, languages) بأفضل "
-        "صياغة ممكنة."
+        "قواعد التحقق من اكتمال المعلومات وطرح الأسئلة:\n"
+        "العناصر الأساسية المطلوبة لبناء سيرة ذاتية مفيدة:\n"
+        "1) الاسم الكامل للمستخدم.\n"
+        "2) وسيلة تواصل واحدة على الأقل (رقم هاتف أو إيميل).\n"
+        "3) جهة عمل أو دراسة محددة مع فترة زمنية تقريبية (شركة أو جامعة/معهد).\n"
+        "4) ثلاث مهارات محددة على الأقل.\n\n"
+        "إذا كان هناك أي عنصر ناقص أو غامض، اجعل status = 'needs_more_info' والتزم بالقواعد الصارمة التالية لحقل question:\n"
+        "- السؤال المباشر فقط: اكتب جملة استفهامية واحدة فقط تسأل عن العنصر الناقص الأهم دون أي مقدمات أو شروحات.\n"
+        "- ممنوع منعاً باتاً تلخيص ما كتبه المستخدم، وممنوع كتابة عبارات مثل 'بناءً على ما ذكرت...' أو 'لقد ذكرت كذا ولكن ينقصنا...'.\n"
+        "- اللهجة والطول: عامية سورية مهذبة ولطيفة وقصيرة جداً (أقل من 20 كلمة).\n"
+        "- أمثلة على الأسئلة المقبولة:\n"
+        "  * 'يا ريت تذكرلنا شو اسم الجامعة أو المعهد وتاريخ التخرج التقريبي؟'\n"
+        "  * 'ممكن اسم الشركة يلي اشتغلت فيها ومسماك الوظيفي؟'\n"
+        "  * 'يا ريت تزودنا برقم هاتف أو إيميل للتواصل معك.'\n"
+        "  * 'شو أبرز المهارات أو البرامج يلي بتتقنها بمجال شغلك؟'\n"
+        "- خيارات الأزرار: اجعل question_type = 'choice' فقط للأسئلة ذات الخيارات المحصورة والواضحة (مثال: 'عندك خبرة عمل سابقة؟' -> ['عندي خبرة', 'ما عندي خبرة بعد'])، وباقي الأسئلة دائماً 'open'.\n"
+        "اجعل follow_up_message مطابقة تماماً لنص question.text.\n\n"
+        "إذا كانت البيانات كاملة، اجعل status = 'complete'، واجعل question = {} و follow_up_message = '' واستخرج بقية الحقول بأفضل صياغة ممكنة."
     ),
     "en": (
-        "In addition, you are responsible for judging whether the essential information needed to "
-        "build a genuinely useful CV (not a near-empty one) is complete, namely:\n"
-        "1) The user's full name\n"
-        "2) At least one contact method (phone or email)\n"
-        "3) At least one item with real details from either (work experience) or (education), and "
-        "that item must include the organization name (company/university) and an approximate time "
-        "period (year or duration), not just a bare title with no context\n"
-        "4) A skills list with at least three specific skills (not vague ones like \"good skills\")\n\n"
-        "If any of these is missing or too vague, set status to \"needs_more_info\". Pick only the "
-        "single most important missing item (never ask about more than one thing at a time) and fill "
-        "the question field:\n"
-        "- text: one short, direct question in respectful conversational Syrian Arabic dialect (never "
-        "re-ask for information already given)\n"
-        "- question_type: \"choice\" only if the logical answer is naturally limited to clear options "
-        "(e.g. \"do you have prior work experience?\" -> options [\"I have experience\", \"Not yet\"]), "
-        "otherwise \"open\" (e.g. asking for the name, experience details, phone/email are all open)\n"
-        "- options: only when choice, 2 to 4 very short options (a word or two each)\n"
-        "Fill follow_up_message with roughly the same text as question.text as a fallback.\n\n"
-        "If all four essential elements are present, set status to \"complete\", leave question as an "
-        "empty object {} and follow_up_message as an empty string \"\", and extract the remaining "
-        "fields (full_name, title, summary, contact, experience, education, skills, languages) in the "
-        "best possible form."
+        "Rules for completeness check and follow-up generation:\n"
+        "Essential elements needed for the CV:\n"
+        "1) Full name.\n"
+        "2) At least one contact method (phone or email).\n"
+        "3) A specific education or experience entity with a timeframe.\n"
+        "4) At least three specific skills.\n\n"
+        "If anything is missing, set status = 'needs_more_info' with strict question rules:\n"
+        "- Single direct question: Write ONLY one short question asking for the single most important missing item.\n"
+        "- Strictly NEVER summarize user input or explain what was received.\n"
+        "- Tone: Respectful, polite Syrian Arabic dialect, under 20 words.\n"
+        "- Set question_type = 'choice' only for binary or simple defined choices, otherwise 'open'.\n"
+        "Fill follow_up_message with the exact text of question.text.\n\n"
+        "If all four elements are present, set status = 'complete', question = {}, follow_up_message = '', and extract the remaining fields."
     ),
 }
 
-# تعليمات مخصصة لحقل summary لضمان نبذة تنفيذية قوية ومترابطة (Executive Professional Summary)
+# تعليمات مخصصة لحقل summary لضمان نبذة تنفيذية قوية ومترابطة (Executive Professional Summary)[cite: 1]
 _SUMMARY_INSTRUCTIONS = {
     "ar": (
         "تعليمات حاسمة لصياغة حقل summary (النبذة المهنية / Professional Summary):\n"
@@ -407,15 +397,7 @@ async def check_and_extract_cv(
     url = f"{_GEMINI_BASE}/{settings.gemini_text_model}:generateContent?key={settings.gemini_api_key}"
     system_prompt = _build_system_prompt(language, style, force_complete)
 
-    # حد توكينات الناتج: نماذج Gemini 3.x (مثل gemini-3.6-flash) تحسب توكينات[cite: 1]
-    # "التفكير" الداخلي ضمن نفس حد maxOutputTokens الخاص بالناتج، فإن لم نترك[cite: 1]
-    # هامشاً كافياً يمكن أن يُقتطع الـ JSON فعلياً (تجربتنا أظهرت سيرة ذاتية[cite: 1]
-    # تحتوي الاسم فقط دون بقية الحقول). هذا التأثير كان أوضح بكثير عند توليد[cite: 1]
-    # سيرة ذاتية بالعربية تحديداً، لأن اللغة العربية تستهلك عدد توكينات أكبر[cite: 1]
-    # من الإنجليزية لنفس كمية المحتوى (Tokenizer أقل كفاءة معها) - ما كان[cite: 1]
-    # يجعل استخراج السيرة العربية يفشل بكثرة بينما تنجح الإنجليزية بنفس النص[cite: 1]
-    # تقريباً. لذلك رفعنا الحد الأساسي، ونعيد المحاولة تلقائياً بحد أعلى بدل[cite: 1]
-    # إفشال الجلسة كاملةً عند أول اقتطاع.[cite: 1]
+    # حد توكينات الناتج: نماذج Gemini 3.x تحسب توكينات التفكير الداخلي ضمن maxOutputTokens[cite: 1]
     token_budgets = [16384, 32768]
     last_finish_reason: str | None = None
     result: dict[str, Any] | None = None
@@ -428,10 +410,6 @@ async def check_and_extract_cv(
                 "response_mime_type": "application/json",
                 "response_schema": _CV_CHECK_SCHEMA,
                 "maxOutputTokens": max_tokens,
-                # نموذج Gemini 3.x يتجاهل temperature/top_p/top_k تماماً، والمعامل[cite: 1]
-                # المعتمد الآن للتحكم بعمق "التفكير" هو thinkingLevel. هذه المهمة[cite: 1]
-                # استخراج/تصنيف مباشر لا تحتاج تفكيراً عميقاً، لذا نستخدم "low" كي[cite: 1]
-                # لا تستهلك توكينات التفكير حيز الناتج الفعلي بلا داعٍ.[cite: 1]
                 # "thinkingConfig": {"thinkingLevel": "low"},
             },
         }
@@ -462,8 +440,6 @@ async def check_and_extract_cv(
         break
 
     if result is None:
-        # لم ننجح حتى بعد رفع حد التوكينات - لا نثق بنتيجة جزئية (مثلاً: full_name[cite: 1]
-        # فقط بدون خبرات/تعليم/مهارات) ونبلّغ عن فشل صريح بدل تسليم سيرة شبه فارغة بصمت.[cite: 1]
         raise RuntimeError(f"استجابة Gemini غير مكتملة (finishReason={last_finish_reason})")
 
     if force_complete:
@@ -471,8 +447,6 @@ async def check_and_extract_cv(
 
     if result.get("status") == "complete":
         result = _sanitize_cv_result(result)
-        # نضمّن اللغة والأسلوب داخل البيانات نفسها كي يستخدمهما مولّدا PDF وDOCX لاحقاً[cite: 1]
-        # دون الحاجة لتعديل مخطط قاعدة البيانات[cite: 1]
         result["_language"] = language
         result["_style"] = style
 
