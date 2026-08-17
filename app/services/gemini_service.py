@@ -1,9 +1,3 @@
-"""
-خدمة التكامل مع Google Gemini API
-- استخراج وهيكلة بيانات السيرة الذاتية من نص عشوائي (Structured JSON Output)
-- فحص صور إيصالات الدفع عبر Gemini Vision (Multimodal)
-تتضمن معالجة أخطاء الشبكة وحالة تجاوز الحد المسموح (HTTP 429) عبر إعادة المحاولة بتأخير تصاعدي
-"""
 from __future__ import annotations
 
 import asyncio
@@ -21,9 +15,6 @@ logger = logging.getLogger(__name__)
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 # مخطط JSON الذي يجب أن يلتزم به Gemini عند فحص اكتمال المعلومات واستخراج بيانات السيرة الذاتية
-# ملاحظة: الحقول المتعلقة بالسيرة الذاتية غير إلزامية هنا (قد تصل جزئية أثناء جولات
-# استكمال المعلومات)، بينما status و follow_up_message إلزاميان دوماً لأنهما يحكمان
-# منطق الحوار مع المستخدم.
 _CV_CHECK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -74,7 +65,14 @@ _CV_CHECK_SCHEMA: dict[str, Any] = {
                 "تعليق. اتركه فارغاً إن لم تكن واثقاً"
             ),
         },
-        "summary": {"type": "string", "description": "ملخص احترافي قصير"},
+        "summary": {
+            "type": "string",
+            "description": (
+                "نبذة مهنية احترافية (Professional Summary) صيغت بأسلوب قوي ومباشر من 2 إلى 3 جمل. "
+                "تتبع هيكلية صريحة: [الهوية/الصفة المهنية المباشرة] + [أبرز الخبرات والمهارات التقنية] + [القيمة المضافة أو الهدف المهني]. "
+                "ممنوع استخدام عبارات الحشو الفارغة (مثل 'طموح'، 'يسعى للتميز') أو الجمل المفككة."
+            ),
+        },
         "contact": {
             "type": "object",
             "properties": {
@@ -213,40 +211,37 @@ _COMPLETENESS_INSTRUCTIONS = {
     ),
 }
 
-# تعليمات مخصصة لحقل summary فقط - لضمان فقرة مترابطة احترافية بدل تجميع معلومات مفكك
+# تعليمات مخصصة ودقيقة لحقل summary - تدعم بناء فقرة احترافية متماسكة عبر الأمثلة (Few-Shot Prompting)
 _SUMMARY_INSTRUCTIONS = {
     "ar": (
-        "تعليمات خاصة بحقل summary (النبذة المهنية) - هذا الحقل يُقرأ غالباً كأول انطباع عن "
-        "السيرة الذاتية فيجب أن يكون احترافياً جداً، وليس مجرد تجميع لمعلومات موجودة بأماكن أخرى:\n"
-        "- ابدأ الجملة الأولى بالصفة المهنية/الدراسية للشخص مباشرة (مثال: \"طالب هندسة بيئة "
-        "في سنته الأولى بجامعة حلب\")، وليس بجملة جر معلّقة تبدأ بمكان أو جهة (ممنوع أسلوب "
-        "\"في جامعة كذا، يمتلك...\")\n"
-        "- اكتب فقرة واحدة مترابطة من جملتين إلى ثلاث جمل قصيرة ومتصلة منطقياً (من هو ← ماذا "
-        "يدرس/يعمل ← أبرز نقطة قوة أو مهارة أو هدف)، وليس جملاً منفصلة مرصوصة بجانب بعضها\n"
-        "- ممنوع تكرار نفس المعلومة حرفياً أو شبه حرفياً التي ستظهر أصلاً في قسم education أو "
-        "experience (مثل تكرار اسم الجامعة والسنة الدراسية بصياغة مطابقة تقريباً) - النبذة "
-        "تلخّص وتربط، ولا تنسخ التفاصيل الحرفية\n"
-        "- لا تستخدم عبارات حشو فارغة المعنى (مثل \"يتمتع بشخصية طموحة\" أو \"يسعى للتميز والنجاح\") "
-        "إلا إذا كان لها سند فعلي من كلام المستخدم\n"
-        "- إن كانت المعلومات المتوفرة قليلة جداً (فقط اسم ودراسة بلا خبرة أو تفاصيل إضافية)، "
-        "اكتفِ بجملة واحدة نظيفة ومباشرة بدل حشو جملتين ضعيفتين"
+        "تعليمات خاصة بدقة وبلاغة حقل summary (النبذة المهنية):\n"
+        "هذا الحقل هو الانطباع الأول في السيرة الذاتية، ويجب أن يُبنى وفق المعادلة التالية:\n"
+        "الجملة 1: [الصفة/الهوية المهنية المباشرة] (مثال: 'طالب هندسة بيئية في السنة الأولى بجامعة حلب...')\n"
+        "الجملة 2: [أهم المهارات أو مجالات التركيز المحددة التي ذكرها المستخدم]\n"
+        "الجملة 3: [القيمة المضافة أو الهدف المهني الحقيقي بأسلوب موثوق]\n\n"
+        "قواعد الصياغة الصارمة:\n"
+        "- ابدأ بالصفة/المسمى الوظيفي مباشرة بدون مقدمات مثل: 'في جامعة كذا...' أو 'يمتلك فلان...'.\n"
+        "- لا تكرر اسم الشركة أو الجامعة بنفس الصياغة الحرفية التي ستظهر في قسم التعليم أو الخبرات.\n"
+        "- يمنع استخدام كلمات إنشائية فارغة مثل ('شخصية طموحة'، 'يسعى للنجاح'، 'متميز').\n\n"
+        "أمثلة للأسلوب المطلوب للتحويل:\n"
+        "• مدخل المستخدم: 'أنا علي بدرس كمبيوتر وعندي خبرة بفلاتر وبدي اشتغل'\n"
+        "  الناتج المطلوب: 'مطور تطبيقات هواتف متمرس في بيئة Flutter وSupabase. يمتلك خبرة في بناء واجهات مستخدم سلسة وإدارة قواعد البيانات السحابية، ويسعى لتقديم حلول برمجية عالية الكفاءة.'\n\n"
+        "• مدخل المستخدم: 'طالب سنة اولى هندسة بيئة حلب ما عندي خبرة بس بحب التحليل البيئي'\n"
+        "  الناتج المطلوب: 'طالب هندسة بيئية في سنته الأولى بجامعة حلب، يركز على مجالات التحليل البيئي واستدامة الموارد. يمتلك شغفاً أكاديمياً بتطبيق الحلول الهندسيّة لحماية البيئة وتطوير المهارات العملية.'"
     ),
     "en": (
-        "Special instructions for the summary field - this is usually the first impression of the CV, "
-        "so it must be genuinely professional, not a mechanical restatement of facts found elsewhere:\n"
-        "- Start the first sentence directly with the person's professional/academic identity (e.g. "
-        "\"First-year environmental engineering student at Aleppo University\"), never with a dangling "
-        "prepositional clause about a place or organization\n"
-        "- Write one cohesive paragraph of two to three short, logically connected sentences (who they "
-        "are -> what they study/do -> a standout strength, skill, or goal), not disconnected facts "
-        "stacked next to each other\n"
-        "- Never repeat, verbatim or near-verbatim, information that will already appear in the "
-        "education or experience sections (e.g. restating the same university name and year almost "
-        "identically) - the summary should synthesize and connect, not copy raw details\n"
-        "- Avoid empty filler phrases (e.g. \"ambitious personality\", \"seeks excellence and success\") "
-        "unless they are actually grounded in something the user said\n"
-        "- If the available information is very limited (just a name and field of study, no experience "
-        "or extra details), write one clean, direct sentence instead of padding it into two weak ones"
+        "Special instructions for crafting the 'summary' field:\n"
+        "Construct a cohesive 2-3 sentence paragraph following this exact formula:\n"
+        "Sentence 1: [Direct Professional/Academic Identity]\n"
+        "Sentence 2: [Key Technical Skills or Core Focus Areas mentioned]\n"
+        "Sentence 3: [Value Addition or Professional Goal]\n\n"
+        "Strict Rules:\n"
+        "- Start directly with the professional identity (e.g., 'Software Engineer specializing in...', 'First-year Environmental Engineering student...'). Never start with dangling clauses like 'At Aleppo University...'.\n"
+        "- Avoid generic buzzwords ('ambitious', 'hard worker', 'seeking success').\n"
+        "- Do not copy-paste the exact same sentence that will appear in education or experience.\n\n"
+        "Examples of desired output quality:\n"
+        "• Raw input: 'I study computer science and know flutter and supabase looking for job'\n"
+        "  Desired output: 'Mobile Application Developer specializing in Flutter and Supabase architectures. Skilled in designing intuitive cross-platform interfaces and managing cloud databases, focused on delivering scalable mobile solutions.'"
     ),
 }
 
@@ -288,7 +283,6 @@ _FINAL_INSTRUCTION = {
     ),
 }
 
-
 _FOLLOW_UP_LANGUAGE_OVERRIDE = (
     "\n\nملاحظة إلزامية بخصوص question.text وfollow_up_message وoptions تحديداً: هذه الحقول "
     "هي حوار مباشر مع المستخدم داخل بوت تيليجرام عربي، وليست جزءاً من محتوى السيرة الذاتية "
@@ -304,8 +298,6 @@ def _build_system_prompt(language: str, style: str, force_complete: bool) -> str
         _STYLE_INSTRUCTIONS.get(language, _STYLE_INSTRUCTIONS["ar"]).get(
             style, _STYLE_INSTRUCTIONS[language]["enhanced"]
         ),
-        # نستخدم دوماً نسخة العربية من تعليمات الاكتمال، لأن follow_up_message حوار مع
-        # المستخدم يجب أن يبقى بالعامية السورية بغض النظر عن لغة السيرة الذاتية المطلوبة
         _COMPLETENESS_INSTRUCTIONS["ar"],
         _SUMMARY_INSTRUCTIONS.get(language, _SUMMARY_INSTRUCTIONS["ar"]),
     ]
@@ -319,12 +311,8 @@ def _build_system_prompt(language: str, style: str, force_complete: bool) -> str
 
 def _clean_short_field(value: Any, max_len: int = 80) -> Any:
     """
-    طبقة حماية إضافية على مستوى الكود (بغض النظر عن مدى التزام النموذج بالبرومبت):
-    تُطبَّق على الحقول القصيرة (سطر واحد متوقع، مثل title وfull_name) لضمان عدم تسرّب
-    أي نص تفسيري/تعليقات مراجعة داخلية من النموذج إلى الناتج النهائي الظاهر للمستخدم.
-    - تأخذ أول سطر فقط
-    - تقصّ الطول عند الحد الأقصى
-    - ترفض القيمة كلياً (ترجعها فارغة) إذا بدت أقرب لنص تفسيري (علامات ':' أو '.' متكررة)
+    طبقة حماية إضافية على مستوى الكود:
+    تُطبَّق على الحقول القصيرة لضمان عدم تسرّب أي نص تفسيري من النموذج.
     """
     if not isinstance(value, str):
         return value
@@ -341,8 +329,6 @@ def _sanitize_cv_result(result: dict[str, Any]) -> dict[str, Any]:
         result["title"] = _clean_short_field(result["title"], max_len=60)
     if "full_name" in result:
         cleaned_name = _clean_short_field(result["full_name"], max_len=80)
-        # الاسم الكامل حقل إلزامي لبناء السيرة الذاتية، فلا نفرغه حتى لو بدا مشبوهاً قليلاً؛
-        # نكتفي بأخذ أول سطر وقصّ الطول دون رفضه بالكامل كما نفعل مع title
         if not cleaned_name:
             first_line = str(result["full_name"]).strip().splitlines()[0].strip()
             cleaned_name = first_line[:80].rsplit(" ", 1)[0].strip() if len(first_line) > 80 else first_line
@@ -388,15 +374,7 @@ async def check_and_extract_cv(
     force_complete: bool = False,
 ) -> dict[str, Any]:
     """
-    يرسل النص المتراكم من المستخدم (قد يضم عدة رسائل متتالية) إلى Gemini، والذي يقوم بدورين معاً:
-    1) الحكم على اكتمال المعلومات الأساسية (status: complete / needs_more_info) وصياغة سؤال
-       متابعة ودّي بالعامية عند النقص (follow_up_message).
-    2) استخراج بيانات السيرة الذاتية المهيكلة بأفضل شكل ممكن متى ما توفرت المعلومات.
-
-    language: "ar" أو "en" - لغة محتوى السيرة الذاتية الناتجة.
-    style: "raw" (الحفاظ على كلام المستخدم كما هو) أو "enhanced" (تحسين الصياغة بلمسة احترافية).
-    force_complete: يُستخدم بعد استنفاد عدد محاولات استكمال المعلومات لإجبار Gemini على
-        الاكتفاء بالمتوفر بدل الاستمرار بطلب المزيد إلى ما لا نهاية.
+    يرسل النص المتراكم من المستخدم إلى Gemini لإجراء التحقق واستخراج بيانات السيرة الذاتية.
     """
     if language not in ("ar", "en"):
         language = "ar"
@@ -406,16 +384,7 @@ async def check_and_extract_cv(
     url = f"{_GEMINI_BASE}/{settings.gemini_text_model}:generateContent?key={settings.gemini_api_key}"
     system_prompt = _build_system_prompt(language, style, force_complete)
 
-    # حد توكينات الناتج: نماذج Gemini 3.x (مثل gemini-3.6-flash) تحسب توكينات
-    # "التفكير" الداخلي ضمن نفس حد maxOutputTokens الخاص بالناتج، فإن لم نترك
-    # هامشاً كافياً يمكن أن يُقتطع الـ JSON فعلياً (تجربتنا أظهرت سيرة ذاتية
-    # تحتوي الاسم فقط دون بقية الحقول). هذا التأثير كان أوضح بكثير عند توليد
-    # سيرة ذاتية بالعربية تحديداً، لأن اللغة العربية تستهلك عدد توكينات أكبر
-    # من الإنجليزية لنفس كمية المحتوى (Tokenizer أقل كفاءة معها) - ما كان
-    # يجعل استخراج السيرة العربية يفشل بكثرة بينما تنجح الإنجليزية بنفس النص
-    # تقريباً. لذلك رفعنا الحد الأساسي، ونعيد المحاولة تلقائياً بحد أعلى بدل
-    # إفشال الجلسة كاملةً عند أول اقتطاع.
-    token_budgets = [16384,32768 ]
+    token_budgets = [16384, 32768]
     last_finish_reason: str | None = None
     result: dict[str, Any] | None = None
 
@@ -427,11 +396,6 @@ async def check_and_extract_cv(
                 "response_mime_type": "application/json",
                 "response_schema": _CV_CHECK_SCHEMA,
                 "maxOutputTokens": max_tokens,
-                # نموذج Gemini 3.x يتجاهل temperature/top_p/top_k تماماً، والمعامل
-                # المعتمد الآن للتحكم بعمق "التفكير" هو thinkingLevel. هذه المهمة
-                # استخراج/تصنيف مباشر لا تحتاج تفكيراً عميقاً، لذا نستخدم "low" كي
-                # لا تستهلك توكينات التفكير حيز الناتج الفعلي بلا داعٍ.
-#                "thinkingConfig": {"thinkingLevel": "low"},
             },
         }
         data = await _call_gemini_with_retry(url, body)
@@ -442,8 +406,7 @@ async def check_and_extract_cv(
         if finish_reason and finish_reason not in ("STOP",):
             logger.warning(
                 "توقفت استجابة Gemini قبل الاكتمال (finishReason=%s, maxOutputTokens=%s, "
-                "محاولة %s/%s, language=%s) - غالباً استهلكت توكينات التفكير الداخلي "
-                "معظم الحد المسموح؛ سنعيد المحاولة بحد أعلى إن أمكن",
+                "محاولة %s/%s, language=%s)",
                 finish_reason, max_tokens, attempt, len(token_budgets), language,
             )
             continue
@@ -461,8 +424,6 @@ async def check_and_extract_cv(
         break
 
     if result is None:
-        # لم ننجح حتى بعد رفع حد التوكينات - لا نثق بنتيجة جزئية (مثلاً: full_name
-        # فقط بدون خبرات/تعليم/مهارات) ونبلّغ عن فشل صريح بدل تسليم سيرة شبه فارغة بصمت.
         raise RuntimeError(f"استجابة Gemini غير مكتملة (finishReason={last_finish_reason})")
 
     if force_complete:
@@ -470,8 +431,6 @@ async def check_and_extract_cv(
 
     if result.get("status") == "complete":
         result = _sanitize_cv_result(result)
-        # نضمّن اللغة والأسلوب داخل البيانات نفسها كي يستخدمهما مولّدا PDF وDOCX لاحقاً
-        # دون الحاجة لتعديل مخطط قاعدة البيانات
         result["_language"] = language
         result["_style"] = style
 
@@ -480,8 +439,7 @@ async def check_and_extract_cv(
 
 async def verify_payment_receipt(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict[str, Any]:
     """
-    يستخدم Gemini Vision للتحقق مما إذا كانت الصورة إيصال دفع حقيقي (Sham Cash)
-    يُعيد: {"is_receipt": bool, "confidence": float, "reason": str}
+    يستخدم Gemini Vision للتحقق من إيصالات الدفع والتحويلات المالية.
     """
     url = f"{_GEMINI_BASE}/{settings.gemini_vision_model}:generateContent?key={settings.gemini_api_key}"
     prompt = (
@@ -512,7 +470,6 @@ async def verify_payment_receipt(image_bytes: bytes, mime_type: str = "image/jpe
                 "required": ["is_receipt", "confidence", "reason"],
             },
             "maxOutputTokens": 1024,
-            "thinkingConfig": {"thinkingLevel": "low"},
         },
     }
     data = await _call_gemini_with_retry(url, body)
