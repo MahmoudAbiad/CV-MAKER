@@ -162,6 +162,36 @@ _STYLE_INSTRUCTIONS = {
     },
 }
 
+# تعليمات خاصة بحقل summary تحديداً: تمنع نمط الترجمة الحرفية الشائع من الإنجليزية
+# ("At [Company], he has experience in...") الذي يظهر بشكل خاطئ كـ "في [الشركة]،
+# يمتلك خبرة في..." وهو أسلوب غير مألوف إطلاقاً في كتابة السير الذاتية العربية
+# الاحترافية. هذه التعليمات منفصلة عن raw/enhanced لأنها تتعلق ببنية الجملة نفسها
+# وليس بمستوى "التحسين".
+_SUMMARY_STYLE_GUIDE = {
+    "ar": (
+        "تعليمات إلزامية خاصة بحقل summary تحديداً: اكتب النبذة بأسلوب سيرة ذاتية عربية "
+        "احترافية أصيلة، وليس بأسلوب يبدو مترجماً حرفياً من الإنجليزية. ممنوع أن تبدأ النبذة "
+        "بجملة تفتتح باسم جهة العمل مثل \"في شركة كذا، يمتلك/تمتلك خبرة في...\" أو \"لدى "
+        "[الجهة]، يعمل على...\" — هذا النمط ركيك وغير مستخدم فعلياً في السير الذاتية العربية "
+        "الحقيقية. ابدأ النبذة بدلاً من ذلك بالمسمى الوظيفي أو التخصص مباشرة (مثال: \"محاسب "
+        "بخبرة تتجاوز 5 سنوات في القطاع المصرفي...\"، أو \"مطوّر برمجيات متخصص في...\")، ثم "
+        "أضِف عدد سنوات الخبرة إن توفر، ثم أبرز المجالات أو المهارات أو الإنجازات. اسم جهة "
+        "العمل (كبنك أو شركة) يُذكر بشكل طبيعي ضمن الجملة إن لزم (مثلاً: \"...عمل لدى بنك "
+        "البركة في تطوير...\") لا كافتتاحية مقدَّمة على الفاعل، أو يُترك أصلاً لحقل experience "
+        "دون تكراره في النبذة. تجنّب أيضاً تكرار صيغة \"يمتلك خبرة في\" كقالب جامد في كل نبذة؛ "
+        "نوّع الصياغة بما يشبه أسلوب كاتب سير ذاتية عربي محترف حقيقي."
+    ),
+    "en": (
+        "Mandatory instruction specific to the summary field: even though this CV's output language "
+        "is English, remember the user's raw input may be Arabic — do not let a literal Arabic "
+        "sentence structure (fronting the employer's name) leak into the English phrasing either. "
+        "Write the summary the way a native English CV-writing professional would: open with the "
+        "job title or specialization, then years of experience if available, then key strengths, "
+        "with the employer name woven naturally into the sentence (not as a fronted \"At [Company], "
+        "...\" clause) or left to the experience section instead."
+    ),
+}
+
 # معايير اكتمال المعلومات + أسلوب طرح السؤال التكميلي على المستخدم
 _COMPLETENESS_INSTRUCTIONS = {
     "ar": (
@@ -267,6 +297,7 @@ def _build_system_prompt(language: str, style: str, force_complete: bool) -> str
         _STYLE_INSTRUCTIONS.get(language, _STYLE_INSTRUCTIONS["ar"]).get(
             style, _STYLE_INSTRUCTIONS[language]["enhanced"]
         ),
+        _SUMMARY_STYLE_GUIDE.get(language, _SUMMARY_STYLE_GUIDE["ar"]),
         # نستخدم دوماً نسخة العربية من تعليمات الاكتمال، لأن follow_up_message حوار مع
         # المستخدم يجب أن يبقى بالعامية السورية بغض النظر عن لغة السيرة الذاتية المطلوبة
         _COMPLETENESS_INSTRUCTIONS["ar"],
