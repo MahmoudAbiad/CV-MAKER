@@ -29,7 +29,6 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
     # بيانات السيرة الذاتية تصل جاهزة ومهيكلة من المعالج (handlers.py) بعد التأكد من
     # اكتمال المعلومات مع المستخدم عبر جولات الحوار، فلا حاجة لاستدعاء Gemini مجدداً هنا
     cv_data = payload["cv_data"]
-    language = cv_data.get("_language", "ar")
 
     try:
         pdf_bytes = generate_cv_pdf(cv_data)
@@ -48,23 +47,14 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
         logger.exception("فشل حفظ سجل السيرة الذاتية بقاعدة البيانات للمستخدم %s", user_id)
 
     file_name = f"CV_{cv_data.get('full_name', 'candidate').replace(' ', '_')}.pdf"
-    pdf_caption = (
-        "✅ هذه نسختك المجانية من السيرة الذاتية بصيغة PDF."
-        if language == "ar"
-        else "✅ Here is your free PDF CV."
-    )
     await bot.send_document(
         chat_id=chat_id,
         document=BufferedInputFile(pdf_bytes, filename=file_name),
-        caption=pdf_caption,
+        caption="✅ هذه نسختك المجانية من السيرة الذاتية بصيغة PDF.",
     )
 
     if cv_id is not None:
-        docx_prompt = (
-            "هل ترغب أيضاً بنسخة Word قابلة للتعديل يمكنك تحديثها بنفسك لاحقاً؟"
-            if language == "ar"
-            else "Would you also like an editable Word version you can update yourself later?"
-        )
+        docx_prompt = "هل ترغب أيضاً بنسخة Word قابلة للتعديل يمكنك تحديثها بنفسك لاحقاً؟"
         await bot.send_message(chat_id, docx_prompt, reply_markup=docx_offer_keyboard(cv_id))
     else:
         # لم نتمكن من حفظ السجل، فلا يوجد cv_id لعرض زر طلب نسخة Word عليه
@@ -73,9 +63,6 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
         retry_msg = (
             "⚠️ تم إرسال ملف PDF بنجاح، لكن حدث خطأ مؤقت أثناء حفظ سجلك. "
             "إذا رغبت بنسخة Word لاحقاً تواصل مع الدعم."
-            if language == "ar"
-            else "⚠️ Your PDF was sent successfully, but we hit a temporary "
-            "error saving your record. Contact support if you'd like a Word version later."
         )
         await bot.send_message(chat_id, retry_msg)
 
@@ -158,17 +145,11 @@ async def _process_docx_generation(bot: Bot, payload: dict[str, Any]) -> None:
         # الملف الذي تم توليده بنجاح وسبق أن دفع المستخدم مقابله.
         logger.exception("فشل حفظ سجل نسخة DOCX بقاعدة البيانات للمستخدم %s", user_id)
 
-    language = cv_record["parsed_json"].get("_language", "ar")
     file_name = f"CV_{cv_record['parsed_json'].get('full_name', 'candidate').replace(' ', '_')}.docx"
-    docx_caption = (
-        "🎉 تفضّل نسختك القابلة للتعديل بصيغة Word!"
-        if language == "ar"
-        else "🎉 Here is your editable Word version!"
-    )
     await bot.send_document(
         chat_id=user_id,
         document=BufferedInputFile(docx_bytes, filename=file_name),
-        caption=docx_caption,
+        caption="🎉 تفضّل نسختك القابلة للتعديل بصيغة Word!",
     )
 
 

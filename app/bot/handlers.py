@@ -117,8 +117,7 @@ async def handle_cv_style_choice(callback: CallbackQuery, state: FSMContext) -> 
 
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
-        "🌐 باي لغة تحب تكون سيرتك الذاتية؟\n"
-        "In which language would you like your CV?",
+        "🌐 باي لغة تحب تكون سيرتك الذاتية؟",
         reply_markup=cv_language_keyboard(),
     )
 
@@ -159,8 +158,7 @@ async def _run_completeness_check(
 ) -> None:
     """يستدعي Gemini للحكم على اكتمال المعلومات: إمّا يطلب من المستخدم إكمالها بلهجة ودّية،
     أو يعتبرها كافية ويرسل الطلب لطابور توليد الـ PDF."""
-    thinking_text = "⏳ لحظة، عم راجع المعلومات..." if language == "ar" else "⏳ One moment, reviewing your details..."
-    await message.answer(thinking_text)
+    await message.answer("⏳ لحظة، عم راجع المعلومات...")
 
     force_complete = attempts >= MAX_INFO_ROUNDS
     try:
@@ -170,18 +168,12 @@ async def _run_completeness_check(
     except Exception:
         logger.exception("فشل فحص/استخراج بيانات السيرة الذاتية عبر Gemini")
         await state.clear()
-        await message.answer(
-            "⚠️ صار في خطأ أثناء تحليل بياناتك. من فضلك حاول مرة أخرى بعد قليل."
-            if language == "ar"
-            else "⚠️ Something went wrong while analyzing your details. Please try again shortly."
-        )
+        await message.answer("⚠️ صار في خطأ أثناء تحليل بياناتك. من فضلك حاول مرة أخرى بعد قليل.")
         return
 
     if result.get("status") != "complete":
         follow_up = result.get("follow_up_message") or (
             "ممكن ترسللي كم معلومة إضافية عن خبراتك أو دراستك ومهاراتك؟"
-            if language == "ar"
-            else "Could you share a bit more about your experience, education, or skills?"
         )
         await state.update_data(attempts=attempts + 1)
         await state.set_state(CvBuildStates.waiting_for_more_info)
@@ -190,12 +182,7 @@ async def _run_completeness_check(
 
     # اكتملت المعلومات: ننتقل لتوليد ملف PDF عبر عامل الخلفية
     await state.clear()
-    processing_text = (
-        "تمام كتير، وصلتني كل المعلومات اللازمة ✅ جارٍ بناء سيرتك الذاتية، لحظات من فضلك..."
-        if language == "ar"
-        else "✅ Got everything I need! Building your CV now, one moment..."
-    )
-    await message.answer(processing_text)
+    await message.answer("تمام كتير، وصلتني كل المعلومات اللازمة ✅ جارٍ بناء سيرتك الذاتية، لحظات من فضلك...")
 
     await enqueue(
         settings.queue_cv_generation,
@@ -232,10 +219,7 @@ async def handle_more_info_wrong_type(message: Message) -> None:
 
 @user_router.message(StateFilter(CvBuildStates.waiting_for_language))
 async def handle_language_choice_fallback(message: Message) -> None:
-    await message.answer(
-        "⬆️ من فضلك اختر لغة السيرة الذاتية بالضغط على أحد الزرين أعلاه.\n"
-        "⬆️ Please pick the CV language using one of the buttons above."
-    )
+    await message.answer("⬆️ من فضلك اختر لغة السيرة الذاتية بالضغط على أحد الزرين أعلاه.")
 
 
 @user_router.callback_query(F.data == "skip_docx")

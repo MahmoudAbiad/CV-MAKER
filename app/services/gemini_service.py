@@ -206,14 +206,27 @@ _FINAL_INSTRUCTION = {
 }
 
 
+_FOLLOW_UP_LANGUAGE_OVERRIDE = (
+    "\n\nملاحظة إلزامية بخصوص follow_up_message تحديداً: هذا الحقل هو رسالة حوار مباشرة "
+    "مع المستخدم داخل بوت تيليجرام عربي، وليس جزءاً من محتوى السيرة الذاتية النهائي. لذلك "
+    "يجب أن يكون follow_up_message دائماً باللهجة العربية العامية السورية المحترمة كما هو "
+    "موضح أعلاه، حتى لو كانت لغة حقول السيرة الذاتية الأخرى (مثل summary أو experience) "
+    "إنجليزية. لا تكتب follow_up_message بالإنجليزية أبداً مهما كانت لغة الناتج المطلوبة."
+)
+
+
 def _build_system_prompt(language: str, style: str, force_complete: bool) -> str:
     parts = [
         _BASE_PROMPTS.get(language, _BASE_PROMPTS["ar"]),
         _STYLE_INSTRUCTIONS.get(language, _STYLE_INSTRUCTIONS["ar"]).get(
             style, _STYLE_INSTRUCTIONS[language]["enhanced"]
         ),
-        _COMPLETENESS_INSTRUCTIONS.get(language, _COMPLETENESS_INSTRUCTIONS["ar"]),
+        # نستخدم دوماً نسخة العربية من تعليمات الاكتمال، لأن follow_up_message حوار مع
+        # المستخدم يجب أن يبقى بالعامية السورية بغض النظر عن لغة السيرة الذاتية المطلوبة
+        _COMPLETENESS_INSTRUCTIONS["ar"],
     ]
+    if language != "ar":
+        parts.append(_FOLLOW_UP_LANGUAGE_OVERRIDE)
     if force_complete:
         parts.append(_FORCE_COMPLETE_SUFFIX.get(language, _FORCE_COMPLETE_SUFFIX["ar"]))
     parts.append(_FINAL_INSTRUCTION.get(language, _FINAL_INSTRUCTION["ar"]))
@@ -307,44 +320,66 @@ async def check_and_extract_cv(
         style = "enhanced"
 
     url = f"{_GEMINI_BASE}/{settings.gemini_text_model}:generateContent?key={settings.gemini_api_key}"
-    body = {
-        "system_instruction": {
-            "parts": [{"text": _build_system_prompt(language, style, force_complete)}]
-        },
-        "contents": [{"role": "user", "parts": [{"text": raw_text}]}],
-        "generationConfig": {
-            "response_mime_type": "application/json",
-            "response_schema": _CV_CHECK_SCHEMA,
-            # حد أقصى سخي لتوكينات الناتج: نماذج Gemini 3.x (مثل gemini-3.6-flash)
-            # تحسب توكينات "التفكير" الداخلي ضمن نفس حد maxOutputTokens الخاص
-            # بالناتج، فإن لم نترك هامشاً كافياً يمكن أن يُقتطع الـ JSON فعلياً
-            # (تجربتنا أظهرت سيرة ذاتية تحتوي الاسم فقط دون بقية الحقول).
-            "maxOutputTokens": 4096,
-            # نموذج Gemini 3.x يتجاهل temperature/top_p/top_k تماماً، والمعامل
-            # المعتمد الآن للتحكم بعمق "التفكير" هو thinkingLevel. هذه المهمة
-            # استخراج/تصنيف مباشر لا تحتاج تفكيراً عميقاً، لذا نستخدم "low" كي
-            # لا تستهلك توكينات التفكير حيز الناتج الفعلي بلا داعٍ.
-            "thinkingConfig": {"thinkingLevel": "low"},
-        },
-    }
-    data = await _call_gemini_with_retry(url, body)
-    candidate = data["candidates"][0]
-    finish_reason = candidate.get("finishReason")
-    if finish_reason and finish_reason not in ("STOP",):
-        # مؤشر مهم: لو توقف Gemini بسبب MAX_TOKENS (غالباً لأن توكينات "التفكير"
-        # الداخلي استهلكت معظم الحد المسموح، فلم يتبقَّ ما يكفي لكتابة كامل
-        # حقول السيرة الذاتية) فالنتيجة قد تكون JSON صالح شكلياً لكنه غير مكتمل
-        # فعلياً (مثلاً: full_name فقط بدون خبرات/تعليم/مهارات رغم أن المستخدم
-        # أرسلها). لا نثق بنتيجة كهذه ونطلب من المستخدم إعادة المحاولة بدل
-        # تسليم سيرة ذاتية شبه فارغة بصمت.
-        logger.error(
-            "توقفت استجابة Gemini قبل الاكتمال (finishReason=%s) - على الأغلب "
-            "استهلكت توكينات التفكير الداخلي معظم حد maxOutputTokens",
-            finish_reason,
-        )
-        raise RuntimeError(f"استجابة Gemini غير مكتملة (finishReason={finish_reason})")
-    text_part = candidate["content"]["parts"][0]["text"]
-    result: dict[str, Any] = json.loads(text_part)
+    system_prompt = _build_system_prompt(language, style, force_complete)
+
+    # حد توكينات الناتج: نماذج Gemini 3.x (مثل gemini-3.6-flash) تحسب توكينات
+    # "التفكير" الداخلي ضمن نفس حد maxOutputTokens الخاص بالناتج، فإن لم نترك
+    # هامشاً كافياً يمكن أن يُقتطع الـ JSON فعلياً (تجربتنا أظهرت سيرة ذاتية
+    # تحتوي الاسم فقط دون بقية الحقول). هذا التأثير كان أوضح بكثير عند توليد
+    # سيرة ذاتية بالعربية تحديداً، لأن اللغة العربية تستهلك عدد توكينات أكبر
+    # من الإنجليزية لنفس كمية المحتوى (Tokenizer أقل كفاءة معها) - ما كان
+    # يجعل استخراج السيرة العربية يفشل بكثرة بينما تنجح الإنجليزية بنفس النص
+    # تقريباً. لذلك رفعنا الحد الأساسي، ونعيد المحاولة تلقائياً بحد أعلى بدل
+    # إفشال الجلسة كاملةً عند أول اقتطاع.
+    token_budgets = [8192, 16384]
+    last_finish_reason: str | None = None
+    result: dict[str, Any] | None = None
+
+    for attempt, max_tokens in enumerate(token_budgets, start=1):
+        body = {
+            "system_instruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": raw_text}]}],
+            "generationConfig": {
+                "response_mime_type": "application/json",
+                "response_schema": _CV_CHECK_SCHEMA,
+                "maxOutputTokens": max_tokens,
+                # نموذج Gemini 3.x يتجاهل temperature/top_p/top_k تماماً، والمعامل
+                # المعتمد الآن للتحكم بعمق "التفكير" هو thinkingLevel. هذه المهمة
+                # استخراج/تصنيف مباشر لا تحتاج تفكيراً عميقاً، لذا نستخدم "low" كي
+                # لا تستهلك توكينات التفكير حيز الناتج الفعلي بلا داعٍ.
+                "thinkingConfig": {"thinkingLevel": "low"},
+            },
+        }
+        data = await _call_gemini_with_retry(url, body)
+        candidate = data["candidates"][0]
+        finish_reason = candidate.get("finishReason")
+        last_finish_reason = finish_reason
+
+        if finish_reason and finish_reason not in ("STOP",):
+            logger.warning(
+                "توقفت استجابة Gemini قبل الاكتمال (finishReason=%s, maxOutputTokens=%s, "
+                "محاولة %s/%s, language=%s) - غالباً استهلكت توكينات التفكير الداخلي "
+                "معظم الحد المسموح؛ سنعيد المحاولة بحد أعلى إن أمكن",
+                finish_reason, max_tokens, attempt, len(token_budgets), language,
+            )
+            continue
+
+        parts = candidate.get("content", {}).get("parts", [])
+        text_part = "".join(p.get("text", "") for p in parts)
+        if not text_part.strip():
+            logger.warning(
+                "استجابة Gemini فارغة رغم finishReason=STOP (محاولة %s/%s, language=%s)",
+                attempt, len(token_budgets), language,
+            )
+            continue
+
+        result = json.loads(text_part)
+        break
+
+    if result is None:
+        # لم ننجح حتى بعد رفع حد التوكينات - لا نثق بنتيجة جزئية (مثلاً: full_name
+        # فقط بدون خبرات/تعليم/مهارات) ونبلّغ عن فشل صريح بدل تسليم سيرة شبه فارغة بصمت.
+        raise RuntimeError(f"استجابة Gemini غير مكتملة (finishReason={last_finish_reason})")
 
     if force_complete:
         result["status"] = "complete"
