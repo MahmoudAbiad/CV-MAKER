@@ -393,7 +393,7 @@ async def check_and_extract_cv(
                 # المعتمد الآن للتحكم بعمق "التفكير" هو thinkingLevel. هذه المهمة
                 # استخراج/تصنيف مباشر لا تحتاج تفكيراً عميقاً، لذا نستخدم "low" كي
                 # لا تستهلك توكينات التفكير حيز الناتج الفعلي بلا داعٍ.
-                "thinkingConfig": {"thinkingLevel": "low"},
+#                "thinkingConfig": {"thinkingLevel": "low"},
             },
         }
         data = await _call_gemini_with_retry(url, body)
