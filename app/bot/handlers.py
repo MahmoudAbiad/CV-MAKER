@@ -28,6 +28,7 @@ from app.bot.keyboards import (
     cv_language_keyboard,
     cv_style_keyboard,
     docx_offer_keyboard,
+    more_info_choice_keyboard,
     payment_instructions_keyboard,
 )
 from app.config import settings
@@ -172,12 +173,24 @@ async def _run_completeness_check(
         return
 
     if result.get("status") != "complete":
-        follow_up = result.get("follow_up_message") or (
+        question = result.get("question") or {}
+        question_text = question.get("text") or result.get("follow_up_message") or (
             "ممكن ترسللي كم معلومة إضافية عن خبراتك أو دراستك ومهاراتك؟"
         )
+        question_type = question.get("question_type")
+        options = [o for o in (question.get("options") or []) if isinstance(o, str) and o.strip()]
+
         await state.update_data(attempts=attempts + 1)
         await state.set_state(CvBuildStates.waiting_for_more_info)
-        await message.answer(follow_up)
+
+        # نعرض أزرار فقط إذا حدّد Gemini صراحةً إنو الجواب المنطقي محصور بخيارات (2-4)،
+        # وإلا نطلب نص حر عادي - المستخدم دايماً بقدر يتجاوز الأزرار ويكتب نص بدلها (fallback)
+        if question_type == "choice" and 2 <= len(options) <= 4:
+            await state.update_data(pending_question_text=question_text, pending_options=options)
+            await message.answer(question_text, reply_markup=more_info_choice_keyboard(options))
+        else:
+            await state.update_data(pending_question_text=None, pending_options=None)
+            await message.answer(question_text)
         return
 
     # اكتملت المعلومات: ننتقل لتوليد ملف PDF عبر عامل الخلفية
@@ -203,9 +216,42 @@ async def handle_more_info_reply(message: Message, state: FSMContext) -> None:
     attempts = data.get("attempts", 0)
 
     combined_text = f"{raw_text}\n{message.text}".strip()
-    await state.update_data(raw_text=combined_text)
+    await state.update_data(raw_text=combined_text, pending_question_text=None, pending_options=None)
 
     await _run_completeness_check(message, state, combined_text, language, style, attempts=attempts)
+
+
+@user_router.callback_query(
+    StateFilter(CvBuildStates.waiting_for_more_info), F.data.startswith("cvq:")
+)
+async def handle_more_info_choice(callback: CallbackQuery, state: FSMContext) -> None:
+    """يعالج جواب المستخدم عندما يضغط أحد أزرار سؤال استكمال المعلومات (بدل كتابة نص حر)."""
+    await callback.answer()
+    data = await state.get_data()
+    options: list[str] = data.get("pending_options") or []
+    question_text: str = data.get("pending_question_text") or ""
+
+    try:
+        option_idx = int(callback.data.split(":")[1])
+        selected_option = options[option_idx]
+    except (ValueError, IndexError):
+        # الأزرار انتهت صلاحيتها (مثلاً جاءت من جولة سابقة) - نطلب من المستخدم إعادة الكتابة كنص
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer("⚠️ انتهت صلاحية هالخيارات، ممكن تكتبلي الجواب كنص بدل الأزرار؟")
+        return
+
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    raw_text = data.get("raw_text", "")
+    language = data.get("language", "ar")
+    style = data.get("style", "enhanced")
+    attempts = data.get("attempts", 0)
+
+    # نضيف السؤال والجواب المختار سوا للسياق التراكمي، تماماً متل لو المستخدم كتبهن كنص
+    combined_text = f"{raw_text}\n{question_text}: {selected_option}".strip()
+    await state.update_data(raw_text=combined_text, pending_question_text=None, pending_options=None)
+
+    await _run_completeness_check(callback.message, state, combined_text, language, style, attempts=attempts)
 
 
 @user_router.message(StateFilter(CvBuildStates.waiting_for_more_info))

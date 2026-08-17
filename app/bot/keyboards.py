@@ -18,6 +18,18 @@ def cv_style_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def more_info_choice_keyboard(options: list[str]) -> InlineKeyboardMarkup:
+    """يبني أزرار ديناميكية لسؤال استكمال معلومات ذو خيارات محدودة (2-4)، حسب ما يقرره Gemini.
+    كل زر ثابت بـ index الخيار داخل قائمة options نفسها (المخزّنة بالـ FSM state) بدل نص الخيار
+    الكامل، تجنّباً لتجاوز الحد الأقصى لطول callback_data ولتفادي مشاكل الأحرف الخاصة/العربية."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=option[:64], callback_data=f"cvq:{idx}")]
+            for idx, option in enumerate(options[:4])
+        ]
+    )
+
+
 def cv_language_keyboard() -> InlineKeyboardMarkup:
     """يسأل المستخدم عن لغة السيرة الذاتية الناتجة قبل إرسالها لـ Gemini."""
     return InlineKeyboardMarkup(

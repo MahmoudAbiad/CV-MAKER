@@ -32,9 +32,39 @@ _CV_CHECK_SCHEMA: dict[str, Any] = {
             "enum": ["complete", "needs_more_info"],
             "description": "complete إذا كانت المعلومات الأساسية كافية لبناء سيرة ذاتية، وإلا needs_more_info",
         },
+        "question": {
+            "type": "object",
+            "description": (
+                "السؤال الوحيد الأهم عن المعلومة الناقصة؛ اتركه ككائن فارغ {} إن كانت الحالة complete. "
+                "لا تطرح أكثر من سؤال واحد بكل مرة."
+            ),
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "نص السؤال بلهجة عربية عامية سورية محترمة، قصير ومباشر",
+                },
+                "question_type": {
+                    "type": "string",
+                    "enum": ["choice", "open"],
+                    "description": (
+                        "choice فقط إذا كانت الإجابة تنحصر منطقياً بخيارات محدودة وواضحة (2-4 خيارات) "
+                        "مثل نعم/لا أو الاختيار بين فئات معروفة. open لأي سؤال يحتاج إجابة حرة "
+                        "(اسم، تفاصيل خبرة، تواريخ، أرقام تواصل...)"
+                    ),
+                },
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "خيارات قصيرة جداً (كلمة أو كلمتين) تُعرض كأزرار؛ فقط عندما question_type=choice، بين 2 و4 خيارات",
+                },
+            },
+        },
         "follow_up_message": {
             "type": "string",
-            "description": "رسالة ودّية للمستخدم تطلب المعلومات الناقصة تحديداً؛ نص فارغ إن كانت الحالة complete",
+            "description": (
+                "احتياطي فقط: نفس نص question.text تقريباً، يُستخدم إذا تعذّر عرض الأزرار. "
+                "اتركه فارغاً إن كانت الحالة complete."
+            ),
         },
         "full_name": {"type": "string"},
         "title": {
@@ -79,7 +109,7 @@ _CV_CHECK_SCHEMA: dict[str, Any] = {
         "skills": {"type": "array", "items": {"type": "string"}},
         "languages": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["status", "follow_up_message"],
+    "required": ["status", "question", "follow_up_message"],
 }
 
 # الشخصية الأساسية للمساعد + توجيه لغة الحقول النهائية للسيرة الذاتية
@@ -136,34 +166,50 @@ _STYLE_INSTRUCTIONS = {
 _COMPLETENESS_INSTRUCTIONS = {
     "ar": (
         "بالإضافة لما سبق، أنت مسؤول عن التحقق من اكتمال المعلومات الأساسية اللازمة لبناء سيرة "
-        "ذاتية مفيدة، وهي:\n"
+        "ذاتية مفيدة ومقنعة فعلاً (وليست شبه فارغة)، وهي:\n"
         "1) الاسم الكامل للمستخدم\n"
-        "2) عنصر واحد على الأقل بتفاصيل حقيقية من (خبرة عملية) أو (تعليم/دراسة)\n"
-        "3) قائمة مهارات لا تقل عن مهارتين اثنتين\n\n"
-        "إن كان أي من هذه العناصر ناقصاً أو غامضاً جداً، اجعل status يساوي \"needs_more_info\" "
-        "واكتب في follow_up_message رسالة قصيرة ودّية باللهجة العربية العامية السورية "
-        "المحترمة (بدون أي ألفاظ غير لائقة، وبأسلوب لطيف كأنك موظف استقبال محترف)، تشكر "
-        "المستخدم بإيجاز على ما أرسله حتى الآن، ثم تطلب منه تحديداً وبوضوح العناصر الناقصة فقط "
-        "(لا تكرر السؤال عن معلومات أرسلها المستخدم فعلاً). اجعلها رسالة واحدة قصيرة ومباشرة.\n\n"
-        "أما إن كانت جميع العناصر الأساسية الثلاثة متوفرة (حتى لو بشكل مختصر)، اجعل status يساوي "
-        "\"complete\"، اترك follow_up_message نصاً فارغاً \"\"، واستخرج بقية الحقول "
+        "2) وسيلة تواصل واحدة على الأقل (رقم هاتف أو إيميل)\n"
+        "3) عنصر واحد على الأقل بتفاصيل حقيقية من (خبرة عملية) أو (تعليم/دراسة)، ويجب أن يتضمن "
+        "هذا العنصر اسم الجهة (شركة/جامعة) والفترة الزمنية التقريبية (سنة أو مدة)، وليس مجرد "
+        "مسمى عام بلا سياق\n"
+        "4) قائمة مهارات لا تقل عن ثلاث مهارات محددة (وليست عامة جداً مثل \"مهارات جيدة\")\n\n"
+        "إن كان أي من هذه العناصر ناقصاً أو غامضاً جداً، اجعل status يساوي \"needs_more_info\". "
+        "اختر العنصر الناقص الأهم فقط (لا تسأل عن أكثر من شيء واحد بكل مرة) واملأ حقل question:\n"
+        "- text: سؤال واحد قصير ومباشر بلهجة عربية عامية سورية محترمة (بدون أي ألفاظ غير لائقة، "
+        "وبأسلوب لطيف كأنك موظف استقبال محترف)، لا تكرر السؤال عن معلومة أرسلها المستخدم فعلاً\n"
+        "- question_type: اجعلها \"choice\" فقط إذا كانت الإجابة المنطقية تنحصر بخيارات واضحة "
+        "ومحدودة (مثال: \"هل عندك خبرة عمل سابقة؟\" -> خيارات [\"عندي خبرة\", \"ما عندي خبرة بعد\"])، "
+        "وإلا اجعلها \"open\" (مثال: طلب الاسم، أو تفاصيل الخبرة، أو رقم الهاتف/الإيميل، كلها open)\n"
+        "- options: فقط عند choice، من 2 إلى 4 خيارات قصيرة جداً (كلمة أو كلمتين لكل خيار)\n"
+        "املأ follow_up_message بنفس نص question.text تقريباً كنسخة احتياطية.\n\n"
+        "أما إن كانت جميع العناصر الأربعة الأساسية متوفرة، اجعل status يساوي \"complete\"، اترك "
+        "question كائناً فارغاً {} وfollow_up_message نصاً فارغاً \"\"، واستخرج بقية الحقول "
         "(full_name, title, summary, contact, experience, education, skills, languages) بأفضل "
         "صياغة ممكنة."
     ),
     "en": (
         "In addition, you are responsible for judging whether the essential information needed to "
-        "build a useful CV is complete, namely:\n"
+        "build a genuinely useful CV (not a near-empty one) is complete, namely:\n"
         "1) The user's full name\n"
-        "2) At least one item with real details from either (work experience) or (education)\n"
-        "3) A skills list with at least two skills\n\n"
-        "If any of these is missing or too vague, set status to \"needs_more_info\" and write a short, "
-        "friendly, respectful message in follow_up_message (polite conversational tone, like a "
-        "professional receptionist) that briefly thanks the user for what they already shared, then "
-        "clearly asks only for the specific missing pieces (do not re-ask for information already "
-        "given). Keep it to one short, direct message.\n\n"
-        "If all three essential elements are present (even briefly), set status to \"complete\", leave "
-        "follow_up_message as an empty string \"\", and extract the remaining fields (full_name, title, "
-        "summary, contact, experience, education, skills, languages) in the best possible form."
+        "2) At least one contact method (phone or email)\n"
+        "3) At least one item with real details from either (work experience) or (education), and "
+        "that item must include the organization name (company/university) and an approximate time "
+        "period (year or duration), not just a bare title with no context\n"
+        "4) A skills list with at least three specific skills (not vague ones like \"good skills\")\n\n"
+        "If any of these is missing or too vague, set status to \"needs_more_info\". Pick only the "
+        "single most important missing item (never ask about more than one thing at a time) and fill "
+        "the question field:\n"
+        "- text: one short, direct question in respectful conversational Syrian Arabic dialect (never "
+        "re-ask for information already given)\n"
+        "- question_type: \"choice\" only if the logical answer is naturally limited to clear options "
+        "(e.g. \"do you have prior work experience?\" -> options [\"I have experience\", \"Not yet\"]), "
+        "otherwise \"open\" (e.g. asking for the name, experience details, phone/email are all open)\n"
+        "- options: only when choice, 2 to 4 very short options (a word or two each)\n"
+        "Fill follow_up_message with roughly the same text as question.text as a fallback.\n\n"
+        "If all four essential elements are present, set status to \"complete\", leave question as an "
+        "empty object {} and follow_up_message as an empty string \"\", and extract the remaining "
+        "fields (full_name, title, summary, contact, experience, education, skills, languages) in the "
+        "best possible form."
     ),
 }
 
@@ -207,11 +253,11 @@ _FINAL_INSTRUCTION = {
 
 
 _FOLLOW_UP_LANGUAGE_OVERRIDE = (
-    "\n\nملاحظة إلزامية بخصوص follow_up_message تحديداً: هذا الحقل هو رسالة حوار مباشرة "
-    "مع المستخدم داخل بوت تيليجرام عربي، وليس جزءاً من محتوى السيرة الذاتية النهائي. لذلك "
-    "يجب أن يكون follow_up_message دائماً باللهجة العربية العامية السورية المحترمة كما هو "
-    "موضح أعلاه، حتى لو كانت لغة حقول السيرة الذاتية الأخرى (مثل summary أو experience) "
-    "إنجليزية. لا تكتب follow_up_message بالإنجليزية أبداً مهما كانت لغة الناتج المطلوبة."
+    "\n\nملاحظة إلزامية بخصوص question.text وfollow_up_message وoptions تحديداً: هذه الحقول "
+    "هي حوار مباشر مع المستخدم داخل بوت تيليجرام عربي، وليست جزءاً من محتوى السيرة الذاتية "
+    "النهائي. لذلك يجب أن تكون دائماً باللهجة العربية العامية السورية المحترمة كما هو موضح "
+    "أعلاه، حتى لو كانت لغة حقول السيرة الذاتية الأخرى (مثل summary أو experience) إنجليزية. "
+    "لا تكتبها بالإنجليزية أبداً مهما كانت لغة الناتج المطلوبة."
 )
 
 
