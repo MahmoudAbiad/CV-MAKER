@@ -162,36 +162,6 @@ _STYLE_INSTRUCTIONS = {
     },
 }
 
-# تعليمات خاصة بحقل summary تحديداً: تمنع نمط الترجمة الحرفية الشائع من الإنجليزية
-# ("At [Company], he has experience in...") الذي يظهر بشكل خاطئ كـ "في [الشركة]،
-# يمتلك خبرة في..." وهو أسلوب غير مألوف إطلاقاً في كتابة السير الذاتية العربية
-# الاحترافية. هذه التعليمات منفصلة عن raw/enhanced لأنها تتعلق ببنية الجملة نفسها
-# وليس بمستوى "التحسين".
-_SUMMARY_STYLE_GUIDE = {
-    "ar": (
-        "تعليمات إلزامية خاصة بحقل summary تحديداً: اكتب النبذة بأسلوب سيرة ذاتية عربية "
-        "احترافية أصيلة، وليس بأسلوب يبدو مترجماً حرفياً من الإنجليزية. ممنوع أن تبدأ النبذة "
-        "بجملة تفتتح باسم جهة العمل مثل \"في شركة كذا، يمتلك/تمتلك خبرة في...\" أو \"لدى "
-        "[الجهة]، يعمل على...\" — هذا النمط ركيك وغير مستخدم فعلياً في السير الذاتية العربية "
-        "الحقيقية. ابدأ النبذة بدلاً من ذلك بالمسمى الوظيفي أو التخصص مباشرة (مثال: \"محاسب "
-        "بخبرة تتجاوز 5 سنوات في القطاع المصرفي...\"، أو \"مطوّر برمجيات متخصص في...\")، ثم "
-        "أضِف عدد سنوات الخبرة إن توفر، ثم أبرز المجالات أو المهارات أو الإنجازات. اسم جهة "
-        "العمل (كبنك أو شركة) يُذكر بشكل طبيعي ضمن الجملة إن لزم (مثلاً: \"...عمل لدى بنك "
-        "البركة في تطوير...\") لا كافتتاحية مقدَّمة على الفاعل، أو يُترك أصلاً لحقل experience "
-        "دون تكراره في النبذة. تجنّب أيضاً تكرار صيغة \"يمتلك خبرة في\" كقالب جامد في كل نبذة؛ "
-        "نوّع الصياغة بما يشبه أسلوب كاتب سير ذاتية عربي محترف حقيقي."
-    ),
-    "en": (
-        "Mandatory instruction specific to the summary field: even though this CV's output language "
-        "is English, remember the user's raw input may be Arabic — do not let a literal Arabic "
-        "sentence structure (fronting the employer's name) leak into the English phrasing either. "
-        "Write the summary the way a native English CV-writing professional would: open with the "
-        "job title or specialization, then years of experience if available, then key strengths, "
-        "with the employer name woven naturally into the sentence (not as a fronted \"At [Company], "
-        "...\" clause) or left to the experience section instead."
-    ),
-}
-
 # معايير اكتمال المعلومات + أسلوب طرح السؤال التكميلي على المستخدم
 _COMPLETENESS_INSTRUCTIONS = {
     "ar": (
@@ -240,6 +210,43 @@ _COMPLETENESS_INSTRUCTIONS = {
         "empty object {} and follow_up_message as an empty string \"\", and extract the remaining "
         "fields (full_name, title, summary, contact, experience, education, skills, languages) in the "
         "best possible form."
+    ),
+}
+
+# تعليمات مخصصة لحقل summary فقط - لضمان فقرة مترابطة احترافية بدل تجميع معلومات مفكك
+_SUMMARY_INSTRUCTIONS = {
+    "ar": (
+        "تعليمات خاصة بحقل summary (النبذة المهنية) - هذا الحقل يُقرأ غالباً كأول انطباع عن "
+        "السيرة الذاتية فيجب أن يكون احترافياً جداً، وليس مجرد تجميع لمعلومات موجودة بأماكن أخرى:\n"
+        "- ابدأ الجملة الأولى بالصفة المهنية/الدراسية للشخص مباشرة (مثال: \"طالب هندسة بيئة "
+        "في سنته الأولى بجامعة حلب\")، وليس بجملة جر معلّقة تبدأ بمكان أو جهة (ممنوع أسلوب "
+        "\"في جامعة كذا، يمتلك...\")\n"
+        "- اكتب فقرة واحدة مترابطة من جملتين إلى ثلاث جمل قصيرة ومتصلة منطقياً (من هو ← ماذا "
+        "يدرس/يعمل ← أبرز نقطة قوة أو مهارة أو هدف)، وليس جملاً منفصلة مرصوصة بجانب بعضها\n"
+        "- ممنوع تكرار نفس المعلومة حرفياً أو شبه حرفياً التي ستظهر أصلاً في قسم education أو "
+        "experience (مثل تكرار اسم الجامعة والسنة الدراسية بصياغة مطابقة تقريباً) - النبذة "
+        "تلخّص وتربط، ولا تنسخ التفاصيل الحرفية\n"
+        "- لا تستخدم عبارات حشو فارغة المعنى (مثل \"يتمتع بشخصية طموحة\" أو \"يسعى للتميز والنجاح\") "
+        "إلا إذا كان لها سند فعلي من كلام المستخدم\n"
+        "- إن كانت المعلومات المتوفرة قليلة جداً (فقط اسم ودراسة بلا خبرة أو تفاصيل إضافية)، "
+        "اكتفِ بجملة واحدة نظيفة ومباشرة بدل حشو جملتين ضعيفتين"
+    ),
+    "en": (
+        "Special instructions for the summary field - this is usually the first impression of the CV, "
+        "so it must be genuinely professional, not a mechanical restatement of facts found elsewhere:\n"
+        "- Start the first sentence directly with the person's professional/academic identity (e.g. "
+        "\"First-year environmental engineering student at Aleppo University\"), never with a dangling "
+        "prepositional clause about a place or organization\n"
+        "- Write one cohesive paragraph of two to three short, logically connected sentences (who they "
+        "are -> what they study/do -> a standout strength, skill, or goal), not disconnected facts "
+        "stacked next to each other\n"
+        "- Never repeat, verbatim or near-verbatim, information that will already appear in the "
+        "education or experience sections (e.g. restating the same university name and year almost "
+        "identically) - the summary should synthesize and connect, not copy raw details\n"
+        "- Avoid empty filler phrases (e.g. \"ambitious personality\", \"seeks excellence and success\") "
+        "unless they are actually grounded in something the user said\n"
+        "- If the available information is very limited (just a name and field of study, no experience "
+        "or extra details), write one clean, direct sentence instead of padding it into two weak ones"
     ),
 }
 
@@ -297,10 +304,10 @@ def _build_system_prompt(language: str, style: str, force_complete: bool) -> str
         _STYLE_INSTRUCTIONS.get(language, _STYLE_INSTRUCTIONS["ar"]).get(
             style, _STYLE_INSTRUCTIONS[language]["enhanced"]
         ),
-        _SUMMARY_STYLE_GUIDE.get(language, _SUMMARY_STYLE_GUIDE["ar"]),
         # نستخدم دوماً نسخة العربية من تعليمات الاكتمال، لأن follow_up_message حوار مع
         # المستخدم يجب أن يبقى بالعامية السورية بغض النظر عن لغة السيرة الذاتية المطلوبة
         _COMPLETENESS_INSTRUCTIONS["ar"],
+        _SUMMARY_INSTRUCTIONS.get(language, _SUMMARY_INSTRUCTIONS["ar"]),
     ]
     if language != "ar":
         parts.append(_FOLLOW_UP_LANGUAGE_OVERRIDE)
