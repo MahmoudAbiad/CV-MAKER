@@ -415,7 +415,7 @@ async def check_and_extract_cv(
     # يجعل استخراج السيرة العربية يفشل بكثرة بينما تنجح الإنجليزية بنفس النص
     # تقريباً. لذلك رفعنا الحد الأساسي، ونعيد المحاولة تلقائياً بحد أعلى بدل
     # إفشال الجلسة كاملةً عند أول اقتطاع.
-    token_budgets = [8192, 16384]
+    token_budgets = [16384,32768 ]
     last_finish_reason: str | None = None
     result: dict[str, Any] | None = None
 
