@@ -315,11 +315,35 @@ async def check_and_extract_cv(
         "generationConfig": {
             "response_mime_type": "application/json",
             "response_schema": _CV_CHECK_SCHEMA,
-            "temperature": 0.4,
+            # حد أقصى سخي لتوكينات الناتج: نماذج Gemini 3.x (مثل gemini-3.6-flash)
+            # تحسب توكينات "التفكير" الداخلي ضمن نفس حد maxOutputTokens الخاص
+            # بالناتج، فإن لم نترك هامشاً كافياً يمكن أن يُقتطع الـ JSON فعلياً
+            # (تجربتنا أظهرت سيرة ذاتية تحتوي الاسم فقط دون بقية الحقول).
+            "maxOutputTokens": 4096,
+            # نموذج Gemini 3.x يتجاهل temperature/top_p/top_k تماماً، والمعامل
+            # المعتمد الآن للتحكم بعمق "التفكير" هو thinkingLevel. هذه المهمة
+            # استخراج/تصنيف مباشر لا تحتاج تفكيراً عميقاً، لذا نستخدم "low" كي
+            # لا تستهلك توكينات التفكير حيز الناتج الفعلي بلا داعٍ.
+            "thinkingConfig": {"thinkingLevel": "low"},
         },
     }
     data = await _call_gemini_with_retry(url, body)
-    text_part = data["candidates"][0]["content"]["parts"][0]["text"]
+    candidate = data["candidates"][0]
+    finish_reason = candidate.get("finishReason")
+    if finish_reason and finish_reason not in ("STOP",):
+        # مؤشر مهم: لو توقف Gemini بسبب MAX_TOKENS (غالباً لأن توكينات "التفكير"
+        # الداخلي استهلكت معظم الحد المسموح، فلم يتبقَّ ما يكفي لكتابة كامل
+        # حقول السيرة الذاتية) فالنتيجة قد تكون JSON صالح شكلياً لكنه غير مكتمل
+        # فعلياً (مثلاً: full_name فقط بدون خبرات/تعليم/مهارات رغم أن المستخدم
+        # أرسلها). لا نثق بنتيجة كهذه ونطلب من المستخدم إعادة المحاولة بدل
+        # تسليم سيرة ذاتية شبه فارغة بصمت.
+        logger.error(
+            "توقفت استجابة Gemini قبل الاكتمال (finishReason=%s) - على الأغلب "
+            "استهلكت توكينات التفكير الداخلي معظم حد maxOutputTokens",
+            finish_reason,
+        )
+        raise RuntimeError(f"استجابة Gemini غير مكتملة (finishReason={finish_reason})")
+    text_part = candidate["content"]["parts"][0]["text"]
     result: dict[str, Any] = json.loads(text_part)
 
     if force_complete:
@@ -368,9 +392,15 @@ async def verify_payment_receipt(image_bytes: bytes, mime_type: str = "image/jpe
                 },
                 "required": ["is_receipt", "confidence", "reason"],
             },
-            "temperature": 0.1,
+            "maxOutputTokens": 1024,
+            "thinkingConfig": {"thinkingLevel": "low"},
         },
     }
     data = await _call_gemini_with_retry(url, body)
-    text_part = data["candidates"][0]["content"]["parts"][0]["text"]
+    candidate = data["candidates"][0]
+    finish_reason = candidate.get("finishReason")
+    if finish_reason and finish_reason not in ("STOP",):
+        logger.error("توقفت استجابة فحص الإيصال عبر Gemini قبل الاكتمال (finishReason=%s)", finish_reason)
+        raise RuntimeError(f"استجابة Gemini غير مكتملة (finishReason={finish_reason})")
+    text_part = candidate["content"]["parts"][0]["text"]
     return json.loads(text_part)
