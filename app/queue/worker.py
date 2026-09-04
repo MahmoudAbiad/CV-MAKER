@@ -31,6 +31,11 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
     cv_data = payload["cv_data"]
 
     try:
+        await bot.send_chat_action(chat_id, "upload_document")
+    except Exception:
+        pass
+
+    try:
         pdf_bytes = generate_cv_pdf(cv_data)
     except Exception:
         logger.exception("فشل توليد ملف PDF")

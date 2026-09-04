@@ -111,6 +111,16 @@ async def health_check() -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "cv-generator-bot"})
 
 
+async def _feed_update_safe(update: Update) -> None:
+    """يعالج تحديث تيليجرام واحد بشكل معزول (Task مستقلة) بدل انتظاره مباشرة
+    داخل الـ webhook. أي استثناء غير متوقع هنا كان سابقاً يُبتلع بصمت من قِبل
+    asyncio.create_task إن لم يُلتقط، لذلك نغلّفه بمحاولة صريحة مع تسجيل الخطأ."""
+    try:
+        await dp.feed_update(bot=bot, update=update)
+    except Exception:
+        logger.exception("خطأ غير متوقع أثناء معالجة تحديث تيليجرام رقم %s", update.update_id)
+
+
 @app.post(settings.webhook_path)
 async def telegram_webhook(
     request: Request,
@@ -122,6 +132,11 @@ async def telegram_webhook(
     data = await request.json()
     update = Update.model_validate(data, context={"bot": bot})
 
-    # تغذية التحديث للـ Dispatcher وإرجاع 200 فوراً لتيليغرام
-    await dp.feed_update(bot=bot, update=update)
+    # نُرجع 200 لتيليجرام فوراً دون انتظار اكتمال المعالجة الفعلية (التي قد
+    # تشمل استدعاءات Gemini التي تأخذ ثوانٍ عدة مع إعادة المحاولة). سابقاً كان
+    # الـ webhook ينتظر dp.feed_update بالكامل قبل الرد، ما قد يجعل تيليجرام
+    # يعتبر التحديث "متأخر الرد" ويعيد إرساله (تحديث مكرر يُعالَج مرتين بالتوازي)،
+    # إضافة لتأخير محسوس بين خطوات المحادثة. الآن نعالج التحديث بمهمة asyncio
+    # مستقلة، والرد يعود لتيليجرام فوراً.
+    asyncio.create_task(_feed_update_safe(update))
     return JSONResponse({"ok": True})

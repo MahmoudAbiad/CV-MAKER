@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -308,6 +309,32 @@ def _build_system_prompt(language: str, style: str, force_complete: bool) -> str
     return "\n\n".join(parts)
 
 
+def _looks_degenerate(text: str) -> bool:
+    """
+    كاشف عام لانحلال مخرجات النموذج إلى حلقات تكرار (loop degeneration) - سلوك
+    ملاحظ فعلياً في اللوغز مع بعض النماذج الخفيفة (flash-lite) عند مواجهة
+    برومبت طويل نسبياً: تكرار نفس الكلمة/العبارة عشرات المرات، أو تكرار حرف
+    واحد (مثل سلسلة أصفار) بدل توليد محتوى فعلي. لا علاقة له بطول النص العادي
+    الطبيعي (فقرة نبذة مهنية طويلة مثلاً)، فقط بأنماط التكرار غير الطبيعية.
+    """
+    if not text:
+        return False
+    t = text.strip()
+    if len(t) < 12:
+        return False
+    # نفس الحرف يتكرر أكثر من 6 مرات متتالية (0000000...، !!!!!!!، إلخ)
+    if re.search(r"(.)\1{6,}", t):
+        return True
+    # عبارة قصيرة (كلمة أو كلمتين) تتكرر 3 مرات متتالية على الأقل
+    if re.search(r"(\b(?:[\w\u0600-\u06FF]+\s+){0,1}[\w\u0600-\u06FF]+\b)(?:\s+\1){2,}", t, flags=re.IGNORECASE):
+        return True
+    # عبارة أطول (3-6 كلمات) تتكرر مرتين متتاليتين على الأقل - كافٍ للدلالة على
+    # حلقة تكرار حتى لو لم تكتمل ثلاث مرات كاملة قبل قطع الرد (finishReason)
+    if re.search(r"(\b(?:[\w\u0600-\u06FF]+\s+){2,5}[\w\u0600-\u06FF]+\b)(?:\s+\1){1,}", t, flags=re.IGNORECASE):
+        return True
+    return False
+
+
 def _clean_short_field(value: Any, max_len: int = 80) -> Any:
     """
     طبقة حماية إضافية على مستوى الكود (بغض النظر عن مدى التزام النموذج بالبرومبت):
@@ -316,28 +343,176 @@ def _clean_short_field(value: Any, max_len: int = 80) -> Any:
     - تأخذ أول سطر فقط
     - تقصّ الطول عند الحد الأقصى
     - ترفض القيمة كلياً (ترجعها فارغة) إذا بدت أقرب لنص تفسيري (علامات ':' أو '.' متكررة)
+      أو إذا كانت متحللة لحلقة تكرار (انظر _looks_degenerate)
     """
     if not isinstance(value, str):
         return value
     value = value.strip().splitlines()[0].strip() if value.strip() else ""
-    if value.count(":") >= 2 or value.count(".") >= 2 or len(value) > max_len:
+    if value.count(":") >= 2 or value.count(".") >= 2 or len(value) > max_len or _looks_degenerate(value):
         logger.warning("تم تجاهل حقل قصير مشبوه من مخرجات Gemini: %r", value[:120])
         return ""
     return value
 
 
+def _clean_body_field(value: Any, max_len: int = 900) -> Any:
+    """
+    مثل _clean_short_field لكن للحقول الطويلة نسبياً (summary، bullets، إلخ):
+    لا نرفض النص لمجرد احتوائه عدة نقاط/فواصل (طبيعي بفقرة كاملة)، فقط نرفضه
+    إذا تحلّل لحلقة تكرار واضحة أو تجاوز طولاً غير معقول لحقل من المفترض أن
+    يكون موجزاً.
+    """
+    if not isinstance(value, str):
+        return value
+    value = value.strip()
+    if not value:
+        return ""
+    if _looks_degenerate(value):
+        logger.warning("تم تجاهل حقل نصي متحلل (تكرار) من مخرجات Gemini: %r", value[:160])
+        return ""
+    if len(value) > max_len:
+        value = value[:max_len].rsplit(" ", 1)[0].strip()
+    return value
+
+
 def _sanitize_cv_result(result: dict[str, Any]) -> dict[str, Any]:
-    """ينظّف الحقول المتوقع أن تكون قصيرة قبل استخدامها في توليد PDF/DOCX."""
+    """ينظّف كل الحقول النصية (على مستوياتها المتداخلة) قبل استخدامها في توليد PDF/DOCX،
+    لمنع تسرّب أي نص تفسيري أو مخرجات متحللة (حلقات تكرار) من Gemini إلى الملف النهائي."""
     if "title" in result:
         result["title"] = _clean_short_field(result["title"], max_len=60)
+
     if "full_name" in result:
         cleaned_name = _clean_short_field(result["full_name"], max_len=80)
-        # الاسم الكامل حقل إلزامي لبناء السيرة الذاتية، فلا نفرغه حتى لو بدا مشبوهاً قليلاً؛[cite: 1]
-        # نكتفي بأخذ أول سطر وقصّ الطول دون رفضه بالكامل كما نفعل مع title[cite: 1]
-        if not cleaned_name:
+        # الاسم الكامل حقل إلزامي لبناء السيرة الذاتية، فلا نفرغه حتى لو بدا مشبوهاً قليلاً؛
+        # نكتفي بأخذ أول سطر وقصّ الطول دون رفضه بالكامل كما نفعل مع title - إلا إذا كان
+        # متحللاً فعلياً لحلقة تكرار، حينها نفرغه أيضاً لأنه غير صالح للعرض بأي شكل
+        if not cleaned_name and not _looks_degenerate(str(result["full_name"])):
             first_line = str(result["full_name"]).strip().splitlines()[0].strip()
             cleaned_name = first_line[:80].rsplit(" ", 1)[0].strip() if len(first_line) > 80 else first_line
         result["full_name"] = cleaned_name
+
+    if "summary" in result:
+        result["summary"] = _clean_body_field(result["summary"], max_len=700)
+
+    contact = result.get("contact")
+    if isinstance(contact, dict):
+        for key in ("phone", "email", "location"):
+            if key in contact:
+                contact[key] = _clean_short_field(contact[key], max_len=100)
+
+    experience = result.get("experience")
+    if isinstance(experience, list):
+        cleaned_experience = []
+        for exp in experience:
+            if not isinstance(exp, dict):
+                continue
+            exp["company"] = _clean_short_field(exp.get("company", ""), max_len=100)
+            exp["role"] = _clean_short_field(exp.get("role", ""), max_len=100)
+            exp["period"] = _clean_short_field(exp.get("period", ""), max_len=60)
+            bullets = exp.get("bullets") or []
+            exp["bullets"] = [
+                b for b in (_clean_body_field(x, max_len=300) for x in bullets if isinstance(x, str)) if b
+            ]
+            # نتجاهل السطر بالكامل فقط إذا لم يبقَ منه أي شيء مفيد بعد التنظيف
+            if exp["company"] or exp["role"] or exp["bullets"]:
+                cleaned_experience.append(exp)
+        result["experience"] = cleaned_experience
+
+    education = result.get("education")
+    if isinstance(education, list):
+        cleaned_education = []
+        for edu in education:
+            if not isinstance(edu, dict):
+                continue
+            edu["institution"] = _clean_short_field(edu.get("institution", ""), max_len=100)
+            edu["degree"] = _clean_short_field(edu.get("degree", ""), max_len=100)
+            edu["period"] = _clean_short_field(edu.get("period", ""), max_len=60)
+            if edu["institution"] or edu["degree"]:
+                cleaned_education.append(edu)
+        result["education"] = cleaned_education
+
+    for list_key, max_len in (("skills", 60), ("languages", 40)):
+        items = result.get(list_key)
+        if isinstance(items, list):
+            result[list_key] = [
+                c for c in (_clean_short_field(x, max_len=max_len) for x in items if isinstance(x, str)) if c
+            ]
+
+    return result
+
+
+def _has_minimum_cv_content(result: dict[str, Any]) -> bool:
+    """
+    بوابة حماية أخيرة قبل إرسال أي ملف للمستخدم: حتى لو التزم Gemini بصيغة JSON
+    الصحيحة وأعاد status='complete'، هذا لا يضمن أنه فعلاً ملأ محتوى السيرة
+    الذاتية (بعض الحقول غير إلزامية بالمخطط لأسباب أخرى، وقد تنحل لحلقة تكرار
+    فتُفرَّغ في _sanitize_cv_result). لذلك نتحقق برمجياً أنه تبقّى محتوى فعلي
+    قبل المتابعة لتوليد الملف - بدل إرسال سيرة ذاتية شبه فارغة (فيها الاسم فقط
+    أو حتى بدونه) للمستخدم.
+    """
+    if not (result.get("full_name") or "").strip():
+        return False
+    has_body = bool(
+        (result.get("summary") or "").strip()
+        or result.get("experience")
+        or result.get("education")
+        or result.get("skills")
+    )
+    return has_body
+
+
+# رسالة احتياطية عامة تُستخدم بدل أي سؤال متابعة يصل متحللاً/طويلاً بشكل غير
+# طبيعي (لوحظ فعلياً مع أكثر من نموذج: أحياناً حلقة تكرار كلمات، وأحياناً -كما
+# حصل مع gemini-3.6-flash- انحراف الرد لفقرة مجاملات طويلة جداً رغم أن التعليمات
+# تطلب صراحة جملة واحدة تحت 20 كلمة). هذا الحقل يظهر مباشرة للمستخدم داخل
+# تيليجرام، لذلك يجب ضبطه بصرامة على مستوى الكود بغض النظر عن التزام النموذج.
+_GENERIC_FOLLOWUP_FALLBACK = {
+    "ar": "ممكن تزودني بمعلومات أكتر عن خبراتك أو دراستك أو مهاراتك؟",
+    "en": "Could you share a bit more about your experience, education, or skills?",
+}
+
+
+def _clean_dialogue_text(value: Any, language: str, max_len: int = 220) -> str:
+    """ينظّف حقول الحوار المباشر مع المستخدم (question.text وfollow_up_message):
+    يأخذ أول سطر فقط، ويستبدل القيمة كلياً برسالة احتياطية عامة إذا انحلّت
+    لحلقة تكرار أو تجاوزت طولاً غير معقول لسؤال متابعة واحد مفترض أن يكون
+    قصيراً جداً (أقل من 20 كلمة حسب التعليمات)."""
+    fallback = _GENERIC_FOLLOWUP_FALLBACK.get(language, _GENERIC_FOLLOWUP_FALLBACK["ar"])
+    if not isinstance(value, str) or not value.strip():
+        return fallback
+    text = value.strip()
+    if _looks_degenerate(text) or len(text) > max_len:
+        logger.warning(
+            "تم استبدال حقل حوار متحلل/طويل جداً من مخرجات Gemini برسالة احتياطية عامة "
+            "(الطول الأصلي=%s): %r", len(text), text[:150],
+        )
+        return fallback
+    first_line = text.splitlines()[0].strip()
+    return first_line or fallback
+
+
+def _sanitize_dialogue_result(result: dict[str, Any], language: str) -> dict[str, Any]:
+    """يُطبَّق على استجابات status='needs_more_info' حصراً: ينظّف question.text
+    وquestion.options وfollow_up_message قبل عرضها مباشرة للمستخدم داخل تيليجرام،
+    بشكل مستقل تماماً عن تنظيف حقول محتوى السيرة الذاتية (_sanitize_cv_result)."""
+    question = result.get("question") or {}
+    if not isinstance(question, dict):
+        question = {}
+
+    clean_text = _clean_dialogue_text(question.get("text"), language)
+    question["text"] = clean_text
+
+    options = question.get("options")
+    if isinstance(options, list):
+        question["options"] = [
+            c for c in (_clean_short_field(o, max_len=30) for o in options if isinstance(o, str)) if c
+        ][:4]
+    else:
+        question["options"] = []
+
+    result["question"] = question
+    result["follow_up_message"] = _clean_dialogue_text(
+        result.get("follow_up_message") or clean_text, language
+    )
     return result
 
 
@@ -397,60 +572,92 @@ async def check_and_extract_cv(
     url = f"{_GEMINI_BASE}/{settings.gemini_text_model}:generateContent?key={settings.gemini_api_key}"
     system_prompt = _build_system_prompt(language, style, force_complete)
 
-    # حد توكينات الناتج: نماذج Gemini 3.x تحسب توكينات التفكير الداخلي ضمن maxOutputTokens[cite: 1]
+    # حد توكينات الناتج: بعض نماذج Gemini (السلسلة 3.x خصوصاً) قد تحسب توكينات
+    # التفكير الداخلي ضمن maxOutputTokens، ولوحظ فعلياً في اللوغز أن نماذج
+    # flash-lite (تفكيرها معطّل افتراضياً) قد "تتحلل" لحلقات تكرار طويلة تستهلك
+    # كامل الحد المسموح بدل توليد محتوى فعلي عند مواجهة برومبت طويل ومعقّد. لذلك
+    # نفعّل thinkingConfig بمستوى منخفض بدل تركه بلا ضبط: هذا يعطي النموذج "خطوة
+    # تفكير" قصيرة قبل الكتابة فيقلل احتمال الانحلال، دون كلفة توكينات كبيرة.
     token_budgets = [16384, 32768]
-    last_finish_reason: str | None = None
-    result: dict[str, Any] | None = None
+    max_content_retries = 2  # عدد محاولات كاملة إضافية إذا رجع status=complete لكن بدون محتوى حقيقي
 
-    for attempt, max_tokens in enumerate(token_budgets, start=1):
-        body = {
-            "system_instruction": {"parts": [{"text": system_prompt}]},
-            "contents": [{"role": "user", "parts": [{"text": raw_text}]}],
-            "generationConfig": {
-                "response_mime_type": "application/json",
-                "response_schema": _CV_CHECK_SCHEMA,
-                "maxOutputTokens": max_tokens,
-                # "thinkingConfig": {"thinkingLevel": "low"},
-            },
-        }
-        data = await _call_gemini_with_retry(url, body)
-        candidate = data["candidates"][0]
-        finish_reason = candidate.get("finishReason")
-        last_finish_reason = finish_reason
+    for content_attempt in range(1, max_content_retries + 1):
+        last_finish_reason: str | None = None
+        result: dict[str, Any] | None = None
 
-        if finish_reason and finish_reason not in ("STOP",):
-            logger.warning(
-                "توقفت استجابة Gemini قبل الاكتمال (finishReason=%s, maxOutputTokens=%s, "
-                "محاولة %s/%s, language=%s) - غالباً استهلكت توكينات التفكير الداخلي "
-                "معظم الحد المسموح؛ سنعيد المحاولة بحد أعلى إن أمكن",
-                finish_reason, max_tokens, attempt, len(token_budgets), language,
-            )
-            continue
+        for attempt, max_tokens in enumerate(token_budgets, start=1):
+            body = {
+                "system_instruction": {"parts": [{"text": system_prompt}]},
+                "contents": [{"role": "user", "parts": [{"text": raw_text}]}],
+                "generationConfig": {
+                    "response_mime_type": "application/json",
+                    "response_schema": _CV_CHECK_SCHEMA,
+                    "maxOutputTokens": max_tokens,
+                    "thinkingConfig": {"thinkingLevel": "low"},
+                },
+            }
+            data = await _call_gemini_with_retry(url, body)
+            candidate = data["candidates"][0]
+            finish_reason = candidate.get("finishReason")
+            last_finish_reason = finish_reason
 
-        parts = candidate.get("content", {}).get("parts", [])
-        text_part = "".join(p.get("text", "") for p in parts)
-        if not text_part.strip():
-            logger.warning(
-                "استجابة Gemini فارغة رغم finishReason=STOP (محاولة %s/%s, language=%s)",
-                attempt, len(token_budgets), language,
-            )
-            continue
+            if finish_reason and finish_reason not in ("STOP",):
+                logger.warning(
+                    "توقفت استجابة Gemini قبل الاكتمال (finishReason=%s, maxOutputTokens=%s, "
+                    "محاولة %s/%s, language=%s) - غالباً انحلال لحلقة تكرار أو استهلاك توكينات "
+                    "تفكير؛ سنعيد المحاولة بحد أعلى إن أمكن",
+                    finish_reason, max_tokens, attempt, len(token_budgets), language,
+                )
+                continue
 
-        result = json.loads(text_part)
-        break
+            parts = candidate.get("content", {}).get("parts", [])
+            text_part = "".join(p.get("text", "") for p in parts)
+            if not text_part.strip():
+                logger.warning(
+                    "استجابة Gemini فارغة رغم finishReason=STOP (محاولة %s/%s, language=%s)",
+                    attempt, len(token_budgets), language,
+                )
+                continue
 
-    if result is None:
-        raise RuntimeError(f"استجابة Gemini غير مكتملة (finishReason={last_finish_reason})")
+            result = json.loads(text_part)
+            break
 
-    if force_complete:
-        result["status"] = "complete"
+        if result is None:
+            if content_attempt < max_content_retries:
+                logger.warning(
+                    "فشلت كل محاولات الحصول على استجابة مكتملة من Gemini (محاولة محتوى %s/%s) "
+                    "- سنعيد الكرة من الصفر", content_attempt, max_content_retries,
+                )
+                continue
+            raise RuntimeError(f"استجابة Gemini غير مكتملة (finishReason={last_finish_reason})")
 
-    if result.get("status") == "complete":
+        if force_complete:
+            result["status"] = "complete"
+
+        if result.get("status") != "complete":
+            # لا حاجة للتحقق من اكتمال المحتوى - ما زلنا بمرحلة الأسئلة التكميلية،
+            # لكن يجب تنظيف نص السؤال قبل عرضه مباشرة للمستخدم (انظر التعليق أعلى
+            # _sanitize_dialogue_result - هذا الحقل عُرضة لانحراف/تحلل حتى مع
+            # نماذج أقوى، وليس فقط مشكلة نماذج flash-lite الخفيفة)
+            return _sanitize_dialogue_result(result, language)
+
         result = _sanitize_cv_result(result)
-        result["_language"] = language
-        result["_style"] = style
 
-    return result
+        if _has_minimum_cv_content(result):
+            result["_language"] = language
+            result["_style"] = style
+            return result
+
+        # وصل status=complete لكن بعد التنظيف لم يتبقَّ محتوى فعلي كافٍ (حلقة تكرار
+        # التهمت الحقول المهمة، أو تجاهلها النموذج). لا نرسل هذا للمستخدم أبداً؛
+        # نعيد المحاولة كاملة إن أمكن بدل تسليم سيرة شبه فارغة.
+        logger.warning(
+            "استجابة Gemini status=complete لكن بدون محتوى كافٍ بعد التنظيف "
+            "(محاولة محتوى %s/%s, language=%s) - سنعيد المحاولة",
+            content_attempt, max_content_retries, language,
+        )
+
+    raise RuntimeError("لم يتمكن Gemini من استخراج محتوى كافٍ للسيرة الذاتية بعد عدة محاولات")
 
 
 async def verify_payment_receipt(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict[str, Any]:

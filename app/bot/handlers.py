@@ -160,6 +160,12 @@ async def _run_completeness_check(
     """يستدعي Gemini للحكم على اكتمال المعلومات: إمّا يطلب من المستخدم إكمالها بلهجة ودّية،
     أو يعتبرها كافية ويرسل الطلب لطابور توليد الـ PDF."""
     await message.answer("⏳ لحظة، عم راجع المعلومات...")
+    # مؤشر "يكتب..." يبقى ظاهراً للمستخدم أثناء انتظار استجابة Gemini (قد تأخذ
+    # عدة ثوانٍ خصوصاً مع إعادة المحاولة)، بدل شاشة تبدو متجمدة بلا أي إشارة نشاط
+    try:
+        await message.bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        pass
 
     force_complete = attempts >= MAX_INFO_ROUNDS
     try:
