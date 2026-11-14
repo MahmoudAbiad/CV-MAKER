@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
-DEFAULT_TEXT_MODEL = "gemini-2.0-flash"
-DEFAULT_VISION_MODEL = "gemini-2.0-flash"
-FALLBACK_MODEL = "gemini-1.5-flash"
+DEFAULT_TEXT_MODEL = "gemini-2.5-flash"
+DEFAULT_VISION_MODEL = "gemini-2.5-flash"
+FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.5-pro", "gemini-3-flash-preview"]
 
 _CV_CHECK_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -101,7 +101,7 @@ _CV_CHECK_SCHEMA: dict[str, Any] = {
         "skills": {"type": "array", "items": {"type": "string"}},
         "languages": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["status", "question", "follow_up_message"],
+    "required": ["status"],
 }
 
 _BASE_PROMPTS = {
@@ -504,8 +504,12 @@ async def check_and_extract_cv(
     if style not in ("raw", "enhanced"):
         style = "enhanced"
 
-    model_name = getattr(settings, "gemini_text_model", None) or DEFAULT_TEXT_MODEL
-    url = f"{_GEMINI_BASE}/{model_name}:generateContent?key={settings.gemini_api_key}"
+    preferred_model = getattr(settings, "gemini_text_model", None) or DEFAULT_TEXT_MODEL
+    candidate_models = [preferred_model]
+    for m in FALLBACK_MODELS:
+        if m not in candidate_models:
+            candidate_models.append(m)
+
     system_prompt = _build_system_prompt(language, style, force_complete)
 
     token_budgets = [16384, 32768]
@@ -529,15 +533,20 @@ async def check_and_extract_cv(
                 "generationConfig": generation_config,
             }
 
-            try:
-                data = await _call_gemini_with_retry(url, body)
-            except Exception as e:
-                if model_name != FALLBACK_MODEL and "404" in str(e):
-                    logger.warning("النموذج %s غير متاح، التحول لنموذج الاحتياط %s", model_name, FALLBACK_MODEL)
-                    url = f"{_GEMINI_BASE}/{FALLBACK_MODEL}:generateContent?key={settings.gemini_api_key}"
+            data = None
+            last_err = None
+            for m_name in candidate_models:
+                url = f"{_GEMINI_BASE}/{m_name}:generateContent?key={settings.gemini_api_key}"
+                try:
                     data = await _call_gemini_with_retry(url, body)
-                else:
-                    raise
+                    break
+                except Exception as e:
+                    last_err = e
+                    logger.warning("النموذج %s لم ينجح في تحليل CV (%s)، جاري تجربة النموذج التالي...", m_name, e)
+                    continue
+
+            if data is None:
+                raise RuntimeError(f"تعذر استدعاء أي من نماذج Gemini المتاحة: {last_err}")
 
             candidate = data.get("candidates", [{}])[0]
             finish_reason = candidate.get("finishReason")
@@ -624,8 +633,11 @@ _RECEIPT_SCHEMA: dict[str, Any] = {
 
 async def verify_payment_receipt(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict[str, Any]:
     """فحص صور إيصالات الدفع (Sham Cash) عبر Gemini Multimodal Vision"""
-    model_name = getattr(settings, "gemini_vision_model", None) or DEFAULT_VISION_MODEL
-    url = f"{_GEMINI_BASE}/{model_name}:generateContent?key={settings.gemini_api_key}"
+    preferred_model = getattr(settings, "gemini_vision_model", None) or DEFAULT_VISION_MODEL
+    candidate_models = [preferred_model]
+    for m in FALLBACK_MODELS:
+        if m not in candidate_models:
+            candidate_models.append(m)
 
     target_code = getattr(settings, "sham_cash_code", "")
     prompt = (
@@ -661,15 +673,21 @@ async def verify_payment_receipt(image_bytes: bytes, mime_type: str = "image/jpe
         },
     }
 
-    try:
-        data = await _call_gemini_with_retry(url, body)
-    except Exception as e:
-        if model_name != FALLBACK_MODEL and "404" in str(e):
-            logger.warning("نموذج الرؤية %s غير متاح، التحول لـ %s", model_name, FALLBACK_MODEL)
-            url = f"{_GEMINI_BASE}/{FALLBACK_MODEL}:generateContent?key={settings.gemini_api_key}"
+    data = None
+    last_err = None
+    for m_name in candidate_models:
+        url = f"{_GEMINI_BASE}/{m_name}:generateContent?key={settings.gemini_api_key}"
+        try:
             data = await _call_gemini_with_retry(url, body)
-        else:
-            raise
+            break
+        except Exception as e:
+            last_err = e
+            logger.warning("نموذج الرؤية %s لم ينجح في فحص الإيصال (%s)، تجربة التالي...", m_name, e)
+            continue
+
+    if data is None:
+        logger.error("تعذر فحص الإيصال عبر أي نموذج متاح: %s", last_err)
+        return {"is_receipt": True, "confidence": 0.0, "reason": "تعذّر الفحص الآلي، إحالة للمراجعة اليدوية"}
 
     candidates = data.get("candidates", [])
     if not candidates:

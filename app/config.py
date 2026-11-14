@@ -57,8 +57,8 @@ class Settings:
 
     # --- Gemini ---
     gemini_api_key: str = field(default_factory=lambda: _get_env("GEMINI_API_KEY"))
-    gemini_text_model: str = field(default_factory=lambda: _get_env("GEMINI_TEXT_MODEL", "gemini-2.0-flash"))
-    gemini_vision_model: str = field(default_factory=lambda: _get_env("GEMINI_VISION_MODEL", "gemini-2.0-flash"))
+    gemini_text_model: str = field(default_factory=lambda: _get_env("GEMINI_TEXT_MODEL", "gemini-2.5-flash"))
+    gemini_vision_model: str = field(default_factory=lambda: _get_env("GEMINI_VISION_MODEL", "gemini-2.5-flash"))
 
     # --- Payments (Sham Cash) ---
     sham_cash_code: str = field(default_factory=lambda: _get_env("SHAM_CASH_CODE"))
