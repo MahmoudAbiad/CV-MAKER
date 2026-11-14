@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import gc
 import io
 from typing import Any
 
@@ -285,6 +286,16 @@ def generate_cv_docx(cv_data: dict[str, Any]) -> bytes:
             _add_section_heading(doc, labels["languages"], is_arabic, accent_color)
             _add_styled_paragraph(doc, "  •  ".join(clean_langs), is_arabic, size_pt=10.5, space_after=4)
 
+    # ضمان وجود فقرة واحدة على الأقل لسلامة مستند Word
+    if len(doc.paragraphs) == 0:
+        _add_styled_paragraph(doc, "", is_arabic)
+
     buffer = io.BytesIO()
-    doc.save(buffer)
-    return buffer.getvalue()
+    try:
+        doc.save(buffer)
+        docx_bytes = buffer.getvalue()
+        return docx_bytes
+    finally:
+        buffer.close()
+        del doc
+        gc.collect(1)

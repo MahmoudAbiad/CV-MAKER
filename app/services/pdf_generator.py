@@ -5,10 +5,16 @@
 """
 from __future__ import annotations
 
+import html
+import gc
+import html
 import io
 import os
 from pathlib import Path
 from typing import Any
+
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT
@@ -99,21 +105,20 @@ def _clean_str(val: Any) -> str:
     return str(val).strip()
 
 
+_ARABIC_CONFIG = {
+    "delete_harakat": False,
+    "support_ligatures": True,
+}
+_SHARED_RESHAPER = arabic_reshaper.ArabicReshaper(configuration=_ARABIC_CONFIG)
+
+
 def _reshape_text(text: Any, is_arabic: bool) -> str:
-    """يعيد تشكيل النص العربي ومعالجة اتجاه BiDi لفقرات ReportLab بأمان."""
+    """يعيد تشكيل النص العربي ومعالجة اتجاه BiDi لفقرات ReportLab بأمان وسرعة."""
     s = _clean_str(text)
     if not is_arabic or not s:
         return s
     try:
-        import arabic_reshaper
-        from bidi.algorithm import get_display
-
-        configuration = {
-            "delete_harakat": False,
-            "support_ligatures": True,
-        }
-        reshaper = arabic_reshaper.ArabicReshaper(configuration=configuration)
-        reshaped = reshaper.reshape(s)
+        reshaped = _SHARED_RESHAPER.reshape(s)
         return get_display(reshaped)
     except Exception:
         return s
@@ -129,7 +134,8 @@ def generate_cv_pdf(cv_data: dict[str, Any]) -> bytes:
     alignment = TA_RIGHT if is_arabic else TA_LEFT
 
     def t(text: Any) -> str:
-        return _reshape_text(text, is_arabic)
+        reshaped = _reshape_text(text, is_arabic)
+        return html.escape(reshaped)
 
     buffer = io.BytesIO()
 
@@ -320,5 +326,12 @@ def generate_cv_pdf(cv_data: dict[str, Any]) -> bytes:
             add_section_header(labels["languages"])
             story.append(Paragraph(t("  •  ".join(clean_langs)), base))
 
-    doc.build(story)
-    return buffer.getvalue()
+    try:
+        doc.build(story)
+        pdf_bytes = buffer.getvalue()
+        return pdf_bytes
+    finally:
+        buffer.close()
+        del story
+        del doc
+        gc.collect(1)

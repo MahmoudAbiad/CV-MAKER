@@ -229,7 +229,7 @@ class Database:
         rs = await self.client.execute(
             """
             SELECT id, user_id, amount, currency, receipt_file_id, status,
-                   admin_note, created_at, updated_at, cv_record_id
+                   admin_note, created_at, updated_at, cv_record_id, transaction_id
             FROM payments WHERE id = ?
             """,
             [payment_id],
@@ -248,7 +248,62 @@ class Database:
             "created_at": r[7],
             "updated_at": r[8],
             "cv_record_id": r[9],
+            "transaction_id": r[10] if len(r) > 10 else None,
         }
+
+    async def update_payment_transaction_id(self, payment_id: int, transaction_id: str) -> None:
+        """تحديث معرّف العملية المالي المستخرج من الإيصال."""
+        await self.client.execute(
+            """
+            UPDATE payments
+            SET transaction_id = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            [transaction_id, _now(), payment_id],
+        )
+
+    async def has_pending_payment(self, user_id: int) -> bool:
+        """التحقق مما إذا كان لدى المستخدم طلب دفع معلق قيد المراجعة لمنع الإغراق."""
+        rs = await self.client.execute(
+            "SELECT 1 FROM payments WHERE user_id = ? AND status = 'pending' LIMIT 1",
+            [user_id],
+        )
+        return len(rs.rows) > 0
+
+    async def is_receipt_reused(self, receipt_file_id: str, exclude_payment_id: int | None = None) -> bool:
+        """
+        التحقق من تكرار استخدام صورة الإيصال (file_id) في عمليات سابقة مقبولة أو قيد المعالجة.
+        """
+        if exclude_payment_id:
+            rs = await self.client.execute(
+                "SELECT 1 FROM payments WHERE receipt_file_id = ? AND id != ? AND status IN ('approved', 'pending') LIMIT 1",
+                [receipt_file_id, exclude_payment_id],
+            )
+        else:
+            rs = await self.client.execute(
+                "SELECT 1 FROM payments WHERE receipt_file_id = ? AND status IN ('approved', 'pending') LIMIT 1",
+                [receipt_file_id],
+            )
+        return len(rs.rows) > 0
+
+    async def is_transaction_id_reused(self, transaction_id: str, exclude_payment_id: int | None = None) -> bool:
+        """
+        التحقق من تكرار استخدام رقم العملية المالي (Anti Double-Spending) في عمليات سابقة.
+        """
+        if not transaction_id or transaction_id.strip() in ("", "-", "null", "none"):
+            return False
+        tx = transaction_id.strip()
+        if exclude_payment_id:
+            rs = await self.client.execute(
+                "SELECT 1 FROM payments WHERE transaction_id = ? AND id != ? AND status IN ('approved', 'pending') LIMIT 1",
+                [tx, exclude_payment_id],
+            )
+        else:
+            rs = await self.client.execute(
+                "SELECT 1 FROM payments WHERE transaction_id = ? AND status IN ('approved', 'pending') LIMIT 1",
+                [tx],
+            )
+        return len(rs.rows) > 0
 
     async def update_payment_status(
         self, payment_id: int, status: str, admin_note: str | None = None

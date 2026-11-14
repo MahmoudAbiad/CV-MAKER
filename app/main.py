@@ -5,7 +5,10 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import json
 import logging
+import secrets
 from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
@@ -16,13 +19,52 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.bot.handlers import admin_router, user_router
-from app.bot.middlewares import AdminOnlyMiddleware, UserRegistrationMiddleware
+from app.bot.middlewares import AdminOnlyMiddleware, ThrottlingMiddleware, UserRegistrationMiddleware
 from app.config import settings
 from app.queue.redis_client import close_redis
 from app.services.db import db
 
+
+class SensitiveDataFilter(logging.Filter):
+    """فلتر أمني لحجب المفاتيح والتوكنات الحساسة تلقائياً من سجلات النظام (Logs)."""
+
+    def __init__(self, secrets_to_mask: list[str]) -> None:
+        super().__init__()
+        self.secrets = [s for s in secrets_to_mask if s and len(s) > 5]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not isinstance(record.msg, str):
+            return True
+        for secret in self.secrets:
+            if secret in record.msg:
+                record.msg = record.msg.replace(secret, "[REDACTED]")
+            if record.args:
+                # فحص الـ args إن كانت نصوصاً
+                new_args = []
+                for arg in record.args if isinstance(record.args, tuple) else [record.args]:
+                    if isinstance(arg, str) and secret in arg:
+                        new_args.append(arg.replace(secret, "[REDACTED]"))
+                    else:
+                        new_args.append(arg)
+                record.args = tuple(new_args)
+        return True
+
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("cv_bot")
+
+# تحسين عتبات جامع القمامة (Garbage Collector) لتناسب بيئة 512MB RAM وتفريغ الذاكرة مبكراً
+gc.set_threshold(400, 8, 8)
+
+# تطبيق فلتر حجب البيانات الحساسة على جميع المعالجات
+_secrets_list = [
+    settings.bot_token,
+    settings.gemini_api_key,
+    settings.turso_auth_token,
+    settings.webhook_secret,
+]
+sensitive_filter = SensitiveDataFilter(_secrets_list)
+logging.getLogger().addFilter(sensitive_filter)
 
 # مراجع قوية للمهام لتفادي جمعها بـ Garbage Collector في Python 3.11+
 _background_tasks: set[asyncio.Task] = set()
@@ -39,6 +81,7 @@ admin_router.callback_query.middleware(AdminOnlyMiddleware())
 
 dp.include_router(admin_router)
 dp.include_router(user_router)
+dp.update.middleware(ThrottlingMiddleware())
 dp.update.middleware(UserRegistrationMiddleware())
 
 
@@ -124,6 +167,12 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    try:
+        from app.services.gemini_service import close_http_client
+        await close_http_client()
+    except Exception:
+        pass
+
     logger.info("✅ تم إيقاف التطبيق بنجاح")
 
 
@@ -147,10 +196,33 @@ async def telegram_webhook(
     request: Request,
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
 ) -> JSONResponse:
-    if settings.webhook_secret and x_telegram_bot_api_secret_token != settings.webhook_secret:
+    # 1. التحقق الصارم في زمن ثابت (Constant-Time) من التوكن السري لمنع هجمات التوقيت
+    if not settings.webhook_secret or not x_telegram_bot_api_secret_token:
+        logger.warning("محاولة وصول غير مصرحة للـ Webhook (غياب التوكن السري)")
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    data = await request.json()
+    if not secrets.compare_digest(x_telegram_bot_api_secret_token, settings.webhook_secret):
+        logger.warning("محاولة وصول غير مصرحة للـ Webhook (توكن سري غير متطابق)")
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # 2. حماية الذاكرة ومنع هجمات حجب الخدمة (DoS) عبر تقييد حجم حمولة الطلب (Max 2MB)
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > 2 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="Payload Too Large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length header")
+
+    body_bytes = await request.body()
+    if len(body_bytes) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Payload Too Large")
+
+    try:
+        data = json.loads(body_bytes)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
     update = Update.model_validate(data, context={"bot": bot})
 
     # إنشاء المهمة مع حفظ مرجع قوي لمنع الـ Garbage Collector من إنهائها مبكراً

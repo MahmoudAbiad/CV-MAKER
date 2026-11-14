@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS payments (
     amount            REAL NOT NULL,
     currency          TEXT NOT NULL DEFAULT 'SYP',
     receipt_file_id   TEXT NOT NULL,            -- file_id الخاص بصورة الإيصال في تيليجرام
+    transaction_id    TEXT,                      -- رقم العملية المستخرج من الإيصال لمنع التكرار
     status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
     admin_note        TEXT,                      -- سبب الرفض أو ملاحظة الأدمن
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
@@ -51,6 +52,8 @@ CREATE TABLE IF NOT EXISTS payments (
 
 CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);
 CREATE INDEX IF NOT EXISTS idx_payments_cv_record_id ON payments(cv_record_id);
+CREATE INDEX IF NOT EXISTS idx_payments_receipt_file_id ON payments(receipt_file_id);
+CREATE INDEX IF NOT EXISTS idx_payments_transaction_id ON payments(transaction_id);
 CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
 CREATE INDEX IF NOT EXISTS idx_payments_created_at ON payments(created_at);
 

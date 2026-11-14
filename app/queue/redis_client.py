@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -16,6 +17,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _redis: aioredis.Redis | None = None
+_redis_lock = asyncio.Lock()
 
 
 def get_redis() -> aioredis.Redis:
@@ -29,19 +31,21 @@ def get_redis() -> aioredis.Redis:
             socket_keepalive=True,
             health_check_interval=25,
             retry_on_timeout=True,
+            max_connections=5,
         )
     return _redis
 
 
 async def reset_redis() -> None:
-    """إغلاق الاتصال الحالي وإعادة ضبط الكائن لإجبار العميل على إعادة الاتصال"""
+    """إغلاق الاتصال الحالي وإعادة ضبط الكائن بأمان مع قفل لتجنب حالات السباق."""
     global _redis
-    if _redis is not None:
-        try:
-            await _redis.close()
-        except Exception:
-            pass
-        _redis = None
+    async with _redis_lock:
+        if _redis is not None:
+            try:
+                await _redis.aclose()
+            except Exception:
+                pass
+            _redis = None
 
 
 async def close_redis() -> None:
@@ -61,23 +65,32 @@ async def enqueue(queue_name: str, payload: dict[str, Any]) -> None:
 
 
 async def dequeue_blocking(queue_name: str, timeout: int = 30) -> dict[str, Any] | None:
+    """سحب مهمة من طابور مفرد (متوافق مع الاستخدامات السابقة)."""
+    res = await dequeue_multi_blocking([queue_name], timeout=timeout)
+    if res is None:
+        return None
+    return res[1]
+
+
+async def dequeue_multi_blocking(queues: list[str], timeout: int = 30) -> tuple[str, dict[str, Any]] | None:
     """
-    سحب مهمة من الطابور مع الحظر، مع معالجة انقطاعات TCP والتنسيقات غير الصالحة.
+    استهلاك متعدد الطوابير بأمر واحد وبأولوية صارمة.
+    يوفر أكثر من 66% من طلبات Redis اليومية في وضع الخمول لحماية كوتة Upstash.
     """
     try:
         r = get_redis()
-        result = await r.brpop([queue_name], timeout=timeout)
+        result = await r.brpop(queues, timeout=timeout)
         if result is None:
             return None
-        _, raw_payload = result
-        return json.loads(raw_payload)
+        queue_name, raw_payload = result
+        return queue_name, json.loads(raw_payload)
     except (RedisConnectionError, RedisTimeoutError, OSError) as exc:
-        logger.warning("انقطاع أو مهلة في اتصال Redis أثناء فحص الطابور %s: %s", queue_name, exc)
+        logger.warning("انقطاع أو مهلة في اتصال Redis: %s", exc)
         await reset_redis()
         return None
     except json.JSONDecodeError as exc:
-        logger.error("تم تجاهل رسالة تالفة (غير صالحة JSON) من الطابور %s: %s", queue_name, exc)
+        logger.error("رسالة غير صالحة JSON من الطابور: %s", exc)
         return None
     except RedisError as exc:
-        logger.error("خطأ عام من عميل Redis في الطابور %s: %s", queue_name, exc)
+        logger.error("خطأ عام من عميل Redis: %s", exc)
         return None
