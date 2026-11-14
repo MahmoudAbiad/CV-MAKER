@@ -26,8 +26,6 @@ logger = logging.getLogger(__name__)
 async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
     chat_id = payload["chat_id"]
     user_id = payload["user_id"]
-    # بيانات السيرة الذاتية تصل جاهزة ومهيكلة من المعالج (handlers.py) بعد التأكد من
-    # اكتمال المعلومات مع المستخدم عبر جولات الحوار، فلا حاجة لاستدعاء Gemini مجدداً هنا
     cv_data = payload["cv_data"]
 
     try:
@@ -36,22 +34,23 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
         pass
 
     try:
-        pdf_bytes = generate_cv_pdf(cv_data)
+        # تشغيل التوليد في خيط منفصل لمنع حجب الـ Event Loop
+        pdf_bytes = await asyncio.to_thread(generate_cv_pdf, cv_data)
     except Exception:
         logger.exception("فشل توليد ملف PDF")
         await bot.send_message(chat_id, "⚠️ حدث خطأ أثناء توليد ملف PDF. حاول مرة أخرى.")
         return
 
-    # نحاول حفظ السجل بقاعدة البيانات، لكن لا نسمح لفشل الحفظ بمنع المستخدم
-    # من استلام الملف الذي تم توليده بنجاح فعلاً (كانا سابقاً مرتبطين، فإذا
-    # فشل insert_cv_record كان المستخدم لا يحصل على PDF نهائياً رغم توليده).
     cv_id: int | None = None
     try:
         cv_id = await db.insert_cv_record(user_id=user_id, parsed_json=cv_data, fmt="pdf")
     except Exception:
         logger.exception("فشل حفظ سجل السيرة الذاتية بقاعدة البيانات للمستخدم %s", user_id)
 
-    file_name = f"CV_{cv_data.get('full_name', 'candidate').replace(' ', '_')}.pdf"
+    safe_name = cv_data.get("full_name") or "candidate"
+    safe_name = str(safe_name).replace(" ", "_")
+    file_name = f"CV_{safe_name}.pdf"
+
     await bot.send_document(
         chat_id=chat_id,
         document=BufferedInputFile(pdf_bytes, filename=file_name),
@@ -62,9 +61,6 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
         docx_prompt = "هل ترغب أيضاً بنسخة Word قابلة للتعديل يمكنك تحديثها بنفسك لاحقاً؟"
         await bot.send_message(chat_id, docx_prompt, reply_markup=docx_offer_keyboard(cv_id))
     else:
-        # لم نتمكن من حفظ السجل، فلا يوجد cv_id لعرض زر طلب نسخة Word عليه
-        # (الزر يحتاج المعرّف لاحقاً عند معالجة الدفع). نُعلم المستخدم بدل
-        # عرض زر سيفشل عند الضغط عليه.
         retry_msg = (
             "⚠️ تم إرسال ملف PDF بنجاح، لكن حدث خطأ مؤقت أثناء حفظ سجلك. "
             "إذا رغبت بنسخة Word لاحقاً تواصل مع الدعم."
@@ -101,17 +97,23 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
         )
         return
 
-    # إحالة الإيصال إلى مجموعة الأدمن للمراجعة النهائية
     payment = await db.get_payment(payment_id)
     if payment is None:
         logger.error("لم يتم العثور على سجل الدفعة %s", payment_id)
         return
 
+    tx_id = verdict.get("transaction_id") or "-"
+    amt = verdict.get("amount") or "-"
+    recipient = verdict.get("recipient") or "-"
+
     caption = (
         f"🧾 *طلب دفع جديد* #{payment_id}\n"
         f"👤 معرّف المستخدم: `{user_id}`\n"
-        f"💵 المبلغ: {payment['amount']} {payment['currency']}\n"
-        f"🤖 تقييم الفحص الآلي: {verdict.get('reason', '-')} (ثقة {verdict.get('confidence', 0):.2f})"
+        f"💵 المبلغ المطلوب: {payment['amount']} {payment['currency']}\n"
+        f"🔢 رقم المعاملة بالإيصال: `{tx_id}`\n"
+        f"💰 المبلغ المرصود: {amt}\n"
+        f"🎯 المستفيد: {recipient}\n"
+        f"🤖 تقييم الفحص: {verdict.get('reason', '-')} (ثقة {verdict.get('confidence', 0):.2f})"
     )
     await bot.send_photo(
         chat_id=settings.admin_group_id,
@@ -137,7 +139,8 @@ async def _process_docx_generation(bot: Bot, payload: dict[str, Any]) -> None:
         return
 
     try:
-        docx_bytes = generate_cv_docx(cv_record["parsed_json"])
+        # تشغيل التوليد في خيط منفصل
+        docx_bytes = await asyncio.to_thread(generate_cv_docx, cv_record["parsed_json"])
     except Exception:
         logger.exception("فشل توليد ملف DOCX")
         await bot.send_message(user_id, "⚠️ حدث خطأ أثناء توليد ملف Word. تواصل مع الدعم من فضلك.")
@@ -146,11 +149,12 @@ async def _process_docx_generation(bot: Bot, payload: dict[str, Any]) -> None:
     try:
         await db.insert_cv_record(user_id=user_id, parsed_json=cv_record["parsed_json"], fmt="docx")
     except Exception:
-        # نفس المبدأ: فشل تسجيل النسخة بقاعدة البيانات لا يجب أن يمنع تسليم
-        # الملف الذي تم توليده بنجاح وسبق أن دفع المستخدم مقابله.
         logger.exception("فشل حفظ سجل نسخة DOCX بقاعدة البيانات للمستخدم %s", user_id)
 
-    file_name = f"CV_{cv_record['parsed_json'].get('full_name', 'candidate').replace(' ', '_')}.docx"
+    safe_name = cv_record["parsed_json"].get("full_name") or "candidate"
+    safe_name = str(safe_name).replace(" ", "_")
+    file_name = f"CV_{safe_name}.docx"
+
     await bot.send_document(
         chat_id=user_id,
         document=BufferedInputFile(docx_bytes, filename=file_name),

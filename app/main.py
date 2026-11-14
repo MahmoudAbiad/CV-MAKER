@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -23,21 +24,22 @@ from app.services.db import db
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("cv_bot")
 
-bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+# مراجع قوية للمهام لتفادي جمعها بـ Garbage Collector في Python 3.11+
+_background_tasks: set[asyncio.Task] = set()
+_worker_tasks: list[asyncio.Task] = []
+
+bot = Bot(
+    token=settings.bot_token or "123456:dummy_token_for_tests",
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
 dp = Dispatcher()
 
-# ترتيب التسجيل: راوتر الأدمن أولاً كي تُعالَج حالاته (FSM) قبل المعالج العام للنصوص
 admin_router.message.middleware(AdminOnlyMiddleware())
 admin_router.callback_query.middleware(AdminOnlyMiddleware())
 
 dp.include_router(admin_router)
 dp.include_router(user_router)
-
 dp.update.middleware(UserRegistrationMiddleware())
-
-_worker_tasks: list[asyncio.Task] = []
-
-app = FastAPI(title="CV Generator Bot")
 
 
 async def _setup_webhook_safe(webhook_url: str) -> None:
@@ -58,35 +60,54 @@ async def _setup_webhook_safe(webhook_url: str) -> None:
     logger.error("❌ تعذر ضبط الـ Webhook بعد 3 محاولات - تأكد من صلاحية الرابط والتوكن")
 
 
-@app.on_event("startup")
-async def on_startup() -> None:
-    from app.queue.worker import start_workers
-
-    # 1. الاتصال بقاعدة البيانات بشكل آمن
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 0. التحقق من متغيرات البيئة قبل بدء أي خدمة
     try:
-        await db.connect()
-        logger.info("✅ تم الاتصال بقاعدة بيانات Turso")
-    except Exception:
-        logger.exception("⚠️ فشل الاتصال الأولي بقاعدة بيانات Turso")
+        settings.validate_required()
+    except RuntimeError as e:
+        logger.warning("تنبيه متغيرات البيئة: %s", e)
+
+    from app.queue.worker import start_workers
+    global _worker_tasks
+
+    # 1. الاتصال بقاعدة البيانات
+    if settings.turso_db_url and settings.turso_auth_token:
+        try:
+            await db.connect()
+        except Exception:
+            logger.exception("⚠️ فشل الاتصال الأولي بقاعدة بيانات Turso")
 
     # 2. تسجيل الـ Webhook
-    webhook_url = settings.webhook_base_url.rstrip("/") + settings.webhook_path
-    await _setup_webhook_safe(webhook_url)
+    if settings.webhook_base_url and settings.bot_token:
+        webhook_url = settings.webhook_base_url.rstrip("/") + settings.webhook_path
+        await _setup_webhook_safe(webhook_url)
 
-    # 3. تشغيل عمال الطوابير في الخلفية
-    global _worker_tasks
-    try:
-        _worker_tasks = await start_workers(bot)
-        logger.info("✅ تم تشغيل %s عامل خلفية (Background Workers)", len(_worker_tasks))
-    except Exception:
-        logger.exception("⚠️ فشل بدء عمال الخلفية")
+    # 3. تشغيل عمال الخلفية
+    if settings.upstash_redis_url:
+        try:
+            _worker_tasks = await start_workers(bot)
+            logger.info("✅ تم تشغيل %s عامل خلفية (Background Workers)", len(_worker_tasks))
+        except Exception:
+            logger.exception("⚠️ فشل بدء عمال الخلفية")
 
+    yield
 
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
+    # --- مرحلة الإغلاق (Shutdown) ---
+    logger.info("بدء إيقاف التطبيق وإغلاق الاتصالات...")
+
     for task in _worker_tasks:
         task.cancel()
-    await asyncio.gather(*_worker_tasks, return_exceptions=True)
+    if _worker_tasks:
+        await asyncio.gather(*_worker_tasks, return_exceptions=True)
+
+    if _background_tasks:
+        logger.info("انتظار اكتمال %d مهمة تحديث قيد المعالجة...", len(_background_tasks))
+        done, pending = await asyncio.wait(_background_tasks, timeout=5.0)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     try:
         await bot.session.close()
@@ -103,7 +124,10 @@ async def on_shutdown() -> None:
     except Exception:
         pass
 
-    logger.info("تم إيقاف التطبيق بنجاح")
+    logger.info("✅ تم إيقاف التطبيق بنجاح")
+
+
+app = FastAPI(title="CV Generator Bot", lifespan=lifespan)
 
 
 @app.get("/")
@@ -112,9 +136,6 @@ async def health_check() -> JSONResponse:
 
 
 async def _feed_update_safe(update: Update) -> None:
-    """يعالج تحديث تيليجرام واحد بشكل معزول (Task مستقلة) بدل انتظاره مباشرة
-    داخل الـ webhook. أي استثناء غير متوقع هنا كان سابقاً يُبتلع بصمت من قِبل
-    asyncio.create_task إن لم يُلتقط، لذلك نغلّفه بمحاولة صريحة مع تسجيل الخطأ."""
     try:
         await dp.feed_update(bot=bot, update=update)
     except Exception:
@@ -126,17 +147,15 @@ async def telegram_webhook(
     request: Request,
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
 ) -> JSONResponse:
-    if x_telegram_bot_api_secret_token != settings.webhook_secret:
+    if settings.webhook_secret and x_telegram_bot_api_secret_token != settings.webhook_secret:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     data = await request.json()
     update = Update.model_validate(data, context={"bot": bot})
 
-    # نُرجع 200 لتيليجرام فوراً دون انتظار اكتمال المعالجة الفعلية (التي قد
-    # تشمل استدعاءات Gemini التي تأخذ ثوانٍ عدة مع إعادة المحاولة). سابقاً كان
-    # الـ webhook ينتظر dp.feed_update بالكامل قبل الرد، ما قد يجعل تيليجرام
-    # يعتبر التحديث "متأخر الرد" ويعيد إرساله (تحديث مكرر يُعالَج مرتين بالتوازي)،
-    # إضافة لتأخير محسوس بين خطوات المحادثة. الآن نعالج التحديث بمهمة asyncio
-    # مستقلة، والرد يعود لتيليجرام فوراً.
-    asyncio.create_task(_feed_update_safe(update))
+    # إنشاء المهمة مع حفظ مرجع قوي لمنع الـ Garbage Collector من إنهائها مبكراً
+    task = asyncio.create_task(_feed_update_safe(update))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
     return JSONResponse({"ok": True})

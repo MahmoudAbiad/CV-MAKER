@@ -9,35 +9,32 @@ from app.config import settings
 
 
 def cv_style_keyboard() -> InlineKeyboardMarkup:
-    """يسأل المستخدم إن كان يفضّل نصه كما كتبه (مع تنظيم بسيط) أو يريد لمسة احترافية من الذكاء الاصطناعي."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🖊️ خليها متل ما كتبتها بالضبط", callback_data="cv_style:raw")],
-            [InlineKeyboardButton(text="✨ خلّي الذكاء الاصطناعي يلمّعها ويطوّرها", callback_data="cv_style:enhanced")],
+            [InlineKeyboardButton(text="✨ خلّي الذكاء الاصطناعي يلمّعها", callback_data="cv_style:enhanced")],
+            [InlineKeyboardButton(text="❌ إلغاء", callback_data="action:cancel")],
         ]
     )
 
 
 def more_info_choice_keyboard(options: list[str]) -> InlineKeyboardMarkup:
-    """يبني أزرار ديناميكية لسؤال استكمال معلومات ذو خيارات محدودة (2-4)، حسب ما يقرره Gemini.
-    كل زر ثابت بـ index الخيار داخل قائمة options نفسها (المخزّنة بالـ FSM state) بدل نص الخيار
-    الكامل، تجنّباً لتجاوز الحد الأقصى لطول callback_data ولتفادي مشاكل الأحرف الخاصة/العربية."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=option[:64], callback_data=f"cvq:{idx}")]
-            for idx, option in enumerate(options[:4])
-        ]
-    )
+    buttons = [
+        [InlineKeyboardButton(text=option[:50], callback_data=f"cvq:{idx}")]
+        for idx, option in enumerate(options[:4])
+    ]
+    buttons.append([InlineKeyboardButton(text="❌ إلغاء وبدء من جديد", callback_data="action:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def cv_language_keyboard() -> InlineKeyboardMarkup:
-    """يسأل المستخدم عن لغة السيرة الذاتية الناتجة قبل إرسالها لـ Gemini."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="🇸🇦 عربي", callback_data="cv_lang:ar"),
                 InlineKeyboardButton(text="🇬🇧 English", callback_data="cv_lang:en"),
-            ]
+            ],
+            [InlineKeyboardButton(text="❌ إلغاء", callback_data="action:cancel")],
         ]
     )
 
@@ -47,11 +44,11 @@ def docx_offer_keyboard(cv_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"💳 احصل على نسخة Word قابلة للتعديل ({settings.docx_price_usd}$ / {settings.docx_price_syp} ل.س)",
+                    text=f"💳 شراء نسخة Word ({settings.docx_price_usd}$ / {settings.docx_price_syp} ل.س)",
                     callback_data=f"buy_docx:{cv_id}",
                 )
             ],
-            [InlineKeyboardButton(text="لا شكراً، تكفيني نسخة PDF", callback_data="skip_docx")],
+            [InlineKeyboardButton(text="لا شكراً، تكفيني نسخة PDF 👍", callback_data="skip_docx")],
         ]
     )
 
@@ -59,7 +56,16 @@ def docx_offer_keyboard(cv_id: int) -> InlineKeyboardMarkup:
 def payment_instructions_keyboard(cv_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📤 لقد أرسلت المبلغ - رفع إيصال الدفع", callback_data=f"upload_receipt:{cv_id}")]
+            [InlineKeyboardButton(text="📤 رفع إيصال التحويل", callback_data=f"upload_receipt:{cv_id}")],
+            [InlineKeyboardButton(text="❌ إلغاء", callback_data="action:cancel")],
+        ]
+    )
+
+
+def cancel_action_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ إلغاء العملية", callback_data="action:cancel")]
         ]
     )
 
@@ -68,8 +74,31 @@ def admin_review_keyboard(payment_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ قبول", callback_data=f"approve:{payment_id}"),
-                InlineKeyboardButton(text="❌ رفض", callback_data=f"reject:{payment_id}"),
+                InlineKeyboardButton(text="✅ قبول واعتماد", callback_data=f"approve:{payment_id}"),
+                InlineKeyboardButton(text="❌ رفض الإيصال", callback_data=f"reject:{payment_id}"),
+            ]
+        ]
+    )
+
+
+def admin_reject_reasons_keyboard(payment_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📷 صورة الإيصال غير واضحة", callback_data=f"rej_quick:{payment_id}:unclear")],
+            [InlineKeyboardButton(text="💰 المبلغ المحول غير مطابق", callback_data=f"rej_quick:{payment_id}:wrong_amount")],
+            [InlineKeyboardButton(text="🔢 رقم العملية مكرر أو غير موجود", callback_data=f"rej_quick:{payment_id}:invalid_tx")],
+            [InlineKeyboardButton(text="✍️ كتابة سبب مخصص...", callback_data=f"rej_custom:{payment_id}")],
+            [InlineKeyboardButton(text="↩️ تراجع", callback_data=f"rej_cancel:{payment_id}")],
+        ]
+    )
+
+
+def admin_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🚀 نعم، ابدأ البث الآن", callback_data="broadcast:confirm"),
+                InlineKeyboardButton(text="❌ تراجع وإلغاء", callback_data="action:cancel"),
             ]
         ]
     )

@@ -23,18 +23,16 @@ WORKDIR /app
 # مستخدم غير جذري (non-root) لأسباب أمنية
 RUN useradd --create-home --shell /bin/bash appuser
 
-COPY --from=builder /root/.local /home/appuser/.local
-COPY app/ ./app/
-COPY assets/ ./assets/
+COPY --from=builder --chown=appuser:appuser /root/.local /home/appuser/.local
+COPY --chown=appuser:appuser app/ ./app/
+COPY --chown=appuser:appuser assets/ ./assets/
 
 ENV PATH="/home/appuser/.local/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-RUN chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 10000
 
-# عامل واحد فقط (uvicorn worker) للحفاظ على استهلاك ذاكرة منخفض جداً
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "10000", "--workers", "1"]
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000} --workers 1"]

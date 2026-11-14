@@ -7,6 +7,8 @@ services:
     dockerfilePath: ./Dockerfile
     healthCheckPath: /
     envVars:
+      - key: PORT
+        value: "10000"
       - key: BOT_TOKEN
         sync: false
       - key: WEBHOOK_BASE_URL
@@ -28,9 +30,9 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_TEXT_MODEL
-        value: gemini-2.5-flash
+        value: gemini-2.0-flash
       - key: GEMINI_VISION_MODEL
-        value: gemini-2.5-flash
+        value: gemini-2.0-flash
       - key: SHAM_CASH_CODE
         sync: false
       - key: DOCX_PRICE_USD

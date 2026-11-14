@@ -1,13 +1,13 @@
 -- =============================================================
--- سكريبت تهيئة قاعدة بيانات Turso (libSQL)
--- انسخ هذا الملف بالكامل والصقه في Turso Web Console / SQL Shell
+-- سكريبت تهيئة قاعدة بيانات Turso (libSQL) المحدّث والمحصن
+-- آمن بنسبة 100% لإعادة التشغيل المتكرر (Fully Idempotent)
 -- =============================================================
 
 -- تفعيل قيود المفاتيح الأجنبية
 PRAGMA foreign_keys = ON;
 
 -- ---------------------------------------------------------------
--- جدول المستخدمين
+-- 1. جدول المستخدمين
 -- ---------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS users (
     user_id     INTEGER PRIMARY KEY,          -- معرّف تيليجرام الفريد للمستخدم
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 
 -- ---------------------------------------------------------------
--- جدول سير المستخدمين الذاتية (السجلات المُولّدة)
+-- 2. جدول سير المستخدمين الذاتية (السجلات المُولّدة)
 -- ---------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cv_records (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,14 +30,16 @@ CREATE TABLE IF NOT EXISTS cv_records (
 );
 
 CREATE INDEX IF NOT EXISTS idx_cv_records_user_id ON cv_records(user_id);
+CREATE INDEX IF NOT EXISTS idx_cv_records_format ON cv_records(format);
 CREATE INDEX IF NOT EXISTS idx_cv_records_created_at ON cv_records(created_at);
 
 -- ---------------------------------------------------------------
--- جدول المدفوعات (Sham Cash)
+-- 3. جدول المدفوعات (Sham Cash / الدفع الإلكتروني)
 -- ---------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS payments (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id           INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    cv_record_id      INTEGER REFERENCES cv_records(id) ON DELETE SET NULL,
     amount            REAL NOT NULL,
     currency          TEXT NOT NULL DEFAULT 'SYP',
     receipt_file_id   TEXT NOT NULL,            -- file_id الخاص بصورة الإيصال في تيليجرام
@@ -48,11 +50,17 @@ CREATE TABLE IF NOT EXISTS payments (
 );
 
 CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);
+CREATE INDEX IF NOT EXISTS idx_payments_cv_record_id ON payments(cv_record_id);
 CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
 CREATE INDEX IF NOT EXISTS idx_payments_created_at ON payments(created_at);
 
 -- ---------------------------------------------------------------
--- ربط سجل الدفعة بسيرة ذاتية معيّنة يجب توليدها بصيغة DOCX بعد الموافقة
--- (عمود اختياري يسهّل معرفة أي CV يخص أي دفعة)
+-- 4. مشغّل لتحديث حقل updated_at تلقائياً عند تعديل أي دفعة
 -- ---------------------------------------------------------------
-ALTER TABLE payments ADD COLUMN cv_record_id INTEGER REFERENCES cv_records(id);
+CREATE TRIGGER IF NOT EXISTS trg_payments_updated_at
+AFTER UPDATE ON payments
+FOR EACH ROW
+WHEN NEW.updated_at = OLD.updated_at OR NEW.updated_at IS NULL
+BEGIN
+    UPDATE payments SET updated_at = datetime('now') WHERE id = NEW.id;
+END;
