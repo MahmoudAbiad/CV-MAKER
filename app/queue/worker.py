@@ -73,20 +73,28 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
         await bot.send_message(chat_id, retry_msg)
 
 
-def _is_valid_image(data: bytes) -> bool:
-    """التحقق من توقيع البايتات السحرية (Magic Bytes) للصورة لمنع التلاعب بالملفات."""
-    if len(data) < 16:
-        return False
+def _detect_file_mime_type(data: bytes) -> str | None:
+    """التحقق من توقيع البايتات السحرية (Magic Bytes) للصورة أو ملف PDF لمنع التلاعب."""
+    if len(data) < 4:
+        return None
     # JPEG: FF D8 FF
     if data.startswith(b"\xff\xd8\xff"):
-        return True
+        return "image/jpeg"
     # PNG: 89 50 4E 47 0D 0A 1A 0A
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return True
+        return "image/png"
     # WEBP: RIFF....WEBP
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return True
-    return False
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    # PDF: %PDF
+    if data.startswith(b"%PDF"):
+        return "application/pdf"
+    return None
+
+
+def _is_valid_image(data: bytes) -> bool:
+    """التحقق من توقيع البايتات السحرية (Magic Bytes) للصورة أو الـ PDF للتوافق العكسي."""
+    return _detect_file_mime_type(data) is not None
 
 
 async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
@@ -94,14 +102,15 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
     chat_id = payload["chat_id"]
     user_id = payload["user_id"]
     receipt_file_id = payload["receipt_file_id"]
+    is_pdf = bool(payload.get("is_pdf", False))
 
     # 1. التحقق من إعادة استخدام نفس ملف الإيصال (Anti-Replay Attack)
     try:
         if await db.is_receipt_reused(receipt_file_id, exclude_payment_id=payment_id):
-            await db.update_payment_status(payment_id, "rejected", admin_note="صورة الإيصال مستخدمة مسبقاً")
+            await db.update_payment_status(payment_id, "rejected", admin_note="صورة/ملف الإيصال مستخدم مسبقاً")
             await bot.send_message(
                 chat_id,
-                "❌ نعتذر، صورة هذا الإيصال تم استخدامها مسبقاً في عملية دفع أخرى ولا يمكن تكرارها.",
+                "❌ نعتذر، هذا الإيصال تم استخدامه مسبقاً في عملية دفع أخرى ولا يمكن تكراره.",
             )
             return
     except Exception:
@@ -110,44 +119,48 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
     # 2. فحص حجم الملف وتنزيله بأمان لمنع هجمات حجب الخدمة (DoS)
     try:
         file = await bot.get_file(receipt_file_id)
-        # الحد الأقصى المسموح به لحجم الصورة 5 ميغابايت
-        max_size = 5 * 1024 * 1024
+        # الحد الأقصى المسموح به لحجم الملف 10 ميغابايت لدعم ملفات PDF والصور عالية الدقة
+        max_size = 10 * 1024 * 1024
         if file.file_size and file.file_size > max_size:
-            await db.update_payment_status(payment_id, "rejected", admin_note="حجم صورة الإيصال يتجاوز 5MB")
+            await db.update_payment_status(payment_id, "rejected", admin_note="حجم الإيصال يتجاوز 10MB")
             await bot.send_message(
                 chat_id,
-                "⚠️ حجم الصورة كبير جداً (أكثر من 5 ميغابايت). يرجى إرسال لقطة شاشة بحجم مناسب.",
+                "⚠️ حجم الملف كبير جداً (أكثر من 10 ميغابايت). يرجى إرسال ملف بحجم مناسب.",
             )
             return
 
         file_bytes_io = await bot.download_file(file.file_path)
-        image_bytes = file_bytes_io.read()
+        file_bytes = file_bytes_io.read()
     except Exception:
-        logger.exception("فشل تحميل صورة الإيصال من تيليجرام")
-        await bot.send_message(chat_id, "⚠️ تعذر تحميل الصورة، من فضلك أعد رفعها.")
+        logger.exception("فشل تحميل ملف الإيصال من تيليجرام")
+        await bot.send_message(chat_id, "⚠️ تعذر تحميل الملف، من فضلك أعد إرساله.")
         return
 
-    # 3. التحقق من سلامة البايتات وصيغة الصورة
-    if not _is_valid_image(image_bytes):
-        await db.update_payment_status(payment_id, "rejected", admin_note="الملف ليس صورة صالحة (JPEG/PNG/WEBP)")
+    # 3. التحقق من سلامة البايتات وصيغة الملف (صورة أو PDF)
+    detected_mime = _detect_file_mime_type(file_bytes)
+    if not detected_mime:
+        await db.update_payment_status(payment_id, "rejected", admin_note="الملف ليس صورة صالحة أو PDF")
         await bot.send_message(
             chat_id,
-            "❌ الملف المرسل ليس صورة صالحة أو تالف. يرجى إرسال صورة إيصال واضحة بصيغة JPG أو PNG.",
+            "❌ الملف المرسل تالف أو ليس بصيغة مدعومة. يرجى إرسال صورة إيصال واضحة (JPG/PNG) أو ملف PDF صالح.",
         )
         return
 
-    # 4. فحص الإيصال عبر الذكاء الاصطناعي
+    if detected_mime == "application/pdf":
+        is_pdf = True
+
+    # 4. فحص الإيصال عبر الذكاء الاصطناعي مع تمرير نوع الـ MIME الفعلي
     try:
-        verdict = await gemini_service.verify_payment_receipt(image_bytes)
+        verdict = await gemini_service.verify_payment_receipt(file_bytes, mime_type=detected_mime)
     except Exception:
-        logger.exception("فشل فحص الإيصال عبر Gemini Vision - سيُرسل للمراجعة اليدوية مباشرة")
+        logger.exception("فشل فحص الإيصال عبر Gemini - سيُرسل للمراجعة اليدوية مباشرة")
         verdict = {"is_receipt": True, "confidence": 0.0, "reason": "تعذّر الفحص الآلي، مراجعة يدوية مطلوبة"}
 
     if not verdict.get("is_receipt", False) and verdict.get("confidence", 0) >= 0.6:
         await db.update_payment_status(payment_id, "rejected", admin_note="الصورة ليست إيصال دفع صالح")
         await bot.send_message(
             chat_id,
-            "❌ الصورة المرسلة لا تبدو كإيصال دفع صالح. من فضلك أرسل صورة إيصال Sham Cash واضحة ومكتملة.",
+            "❌ الصورة أو الملف المرسل لا تبدو كإيصال دفع صالح. من فضلك أرسل إيصال تحويل شام كاش واضح ومكتمل كصورة أو PDF.",
         )
         return
 
@@ -180,9 +193,10 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
     safe_recipient = html.escape(str(recipient))
     safe_reason = html.escape(str(verdict.get("reason", "-")))
     conf = verdict.get("confidence", 0.0) or 0.0
+    file_type_badge = "📄 مستند PDF" if is_pdf else "🖼️ صورة إيصال"
 
     caption = (
-        f"🧾 <b>طلب دفع جديد #{payment_id}</b>\n"
+        f"🧾 <b>طلب دفع جديد #{payment_id}</b> ({file_type_badge})\n"
         f"👤 معرّف المستخدم: <code>{user_id}</code>\n"
         f"💵 المبلغ المطلوب: {payment['amount']} {payment['currency']}\n"
         f"🔢 رقم المعاملة بالإيصال: <code>{safe_tx_id}</code>\n"
@@ -190,14 +204,52 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
         f"🎯 المستفيد: {safe_recipient}\n"
         f"🤖 تقييم الفحص: {safe_reason} (ثقة {conf:.2f})"
     )
-    await bot.send_photo(
-        chat_id=settings.admin_group_id,
-        photo=receipt_file_id,
-        caption=caption,
-        parse_mode="HTML",
-        reply_markup=admin_review_keyboard(payment_id),
-    )
-    await bot.send_message(chat_id, "🔍 تم إرسال الإيصال لفريق المراجعة، سنُعلمك بالنتيجة قريباً.")
+
+    # 7. إرسال الإشعار لجهات الإدارة (المجموعة و/أو المشرفين المباشرين بحصانة من التعليق)
+    admin_targets: list[int] = []
+    if settings.admin_group_id and settings.admin_group_id != 0:
+        admin_targets.append(settings.admin_group_id)
+    if settings.admin_user_ids:
+        for aid in settings.admin_user_ids:
+            if aid not in admin_targets and aid != 0:
+                admin_targets.append(aid)
+
+    sent_to_admin = False
+    for target_chat_id in admin_targets:
+        try:
+            if is_pdf:
+                await bot.send_document(
+                    chat_id=target_chat_id,
+                    document=receipt_file_id,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=admin_review_keyboard(payment_id),
+                )
+            else:
+                await bot.send_photo(
+                    chat_id=target_chat_id,
+                    photo=receipt_file_id,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=admin_review_keyboard(payment_id),
+                )
+            sent_to_admin = True
+        except Exception as exc:
+            logger.warning("تعذر تسليم إشعار الدفعة إلى الوجهة (%s): %s", target_chat_id, exc)
+
+    if not sent_to_admin:
+        logger.error(
+            "⚠️ تعذر تسليم إشعار الدفعة لأي مشرف! يرجى التأكد من ضبط ADMIN_GROUP_ID أو ADMIN_USER_IDS وبدء المحادثة مع البوت."
+        )
+
+    # 8. إخطار المستخدم بنجاح الفحص والتحويل للمراجعة دون تعليق
+    try:
+        await bot.send_message(
+            chat_id,
+            "🔍 تم استلام إيصالك وتدقيقه بنجاح، وتم تحويله لفريق المراجعة. سنُرسل لك ملف Word فور اعتماده!",
+        )
+    except Exception:
+        logger.exception("فشل إرسال رسالة التأكيد للمستخدم %s", chat_id)
 
 
 async def _process_docx_generation(bot: Bot, payload: dict[str, Any]) -> None:

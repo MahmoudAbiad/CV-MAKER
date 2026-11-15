@@ -983,13 +983,16 @@ async def handle_upload_receipt_prompt(callback: CallbackQuery, state: FSMContex
     await state.update_data(cv_id=cv_id)
     await state.set_state(PaymentStates.waiting_for_receipt)
     await callback.message.answer(
-        "📸 يرجى إرسال صورة إيصال أو إشعار التحويل الآن:",
+        "📸 يرجى إرسال صورة إيصال التحويل أو ملف <b>PDF</b> الآن:",
         reply_markup=cancel_action_keyboard(),
     )
 
 
-@user_router.message(StateFilter(PaymentStates.waiting_for_receipt), F.photo)
-async def handle_receipt_photo(message: Message, state: FSMContext) -> None:
+@user_router.message(
+    StateFilter(PaymentStates.waiting_for_receipt),
+    F.photo | F.document,
+)
+async def handle_receipt_file(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     cv_id = data.get("cv_id")
 
@@ -998,6 +1001,31 @@ async def handle_receipt_photo(message: Message, state: FSMContext) -> None:
         await message.answer(
             "⚠️ عذراً، لم يتم العثور على السيرة الذاتية المرتبطة بهذا الإيصال (انتهت الجلسة).\n"
             "يرجى إعادة اختيار طلب نسخة Word من رسالة السيرة السابقة."
+        )
+        return
+
+    is_pdf = False
+    if message.photo:
+        receipt_file_id = message.photo[-1].file_id
+    elif message.document:
+        doc = message.document
+        mime = (doc.mime_type or "").lower()
+        file_name = (doc.file_name or "").lower()
+        if mime == "application/pdf" or file_name.endswith(".pdf"):
+            is_pdf = True
+            receipt_file_id = doc.file_id
+        elif mime.startswith("image/") or file_name.endswith((".jpg", ".jpeg", ".png", ".webp")):
+            receipt_file_id = doc.file_id
+        else:
+            await message.answer(
+                "⚠️ نوع الملف غير مدعوم. يرجى إرسال الإيصال كـ <b>صورة</b> (JPG / PNG) أو <b>ملف PDF</b> صالح.",
+                reply_markup=cancel_action_keyboard(),
+            )
+            return
+    else:
+        await message.answer(
+            "⚠️ يرجى إرسال الإيصال كـ صورة أو ملف PDF.",
+            reply_markup=cancel_action_keyboard(),
         )
         return
 
@@ -1011,12 +1039,10 @@ async def handle_receipt_photo(message: Message, state: FSMContext) -> None:
     except Exception:
         logger.exception("فشل فحص الدفعات المعلقة للمستخدم %s", message.from_user.id)
 
-    receipt_file_id = message.photo[-1].file_id
-
     try:
         if await db.is_receipt_reused(receipt_file_id):
             await message.answer(
-                "❌ نعتذر، صورة هذا الإيصال تم استخدامها مسبقاً في عملية دفع سابقة.\n"
+                "❌ نعتذر، هذا الإيصال تم استخدامه مسبقاً في عملية دفع سابقة.\n"
                 "يرجى إرسال إيصال جديد وصحيح."
             )
             return
@@ -1032,7 +1058,7 @@ async def handle_receipt_photo(message: Message, state: FSMContext) -> None:
     )
     await state.clear()
 
-    await message.answer("✅ تم استلام صورة الإيصال بنجاح! جارٍ التحقق ومراجعة الطلب...")
+    await message.answer("✅ تم استلام الإيصال بنجاح! جارٍ التحقق ومراجعة الطلب...")
 
     await enqueue(
         settings.queue_receipt_screening,
@@ -1041,6 +1067,7 @@ async def handle_receipt_photo(message: Message, state: FSMContext) -> None:
             "chat_id": message.chat.id,
             "user_id": message.from_user.id,
             "receipt_file_id": receipt_file_id,
+            "is_pdf": is_pdf,
         },
     )
 
@@ -1048,7 +1075,7 @@ async def handle_receipt_photo(message: Message, state: FSMContext) -> None:
 @user_router.message(StateFilter(PaymentStates.waiting_for_receipt))
 async def handle_receipt_wrong_type(message: Message) -> None:
     await message.answer(
-        "⚠️ يرجى إرسال الإيصال كـ <b>صورة</b> (Photo) وليس كملف أو نص.",
+        "⚠️ يرجى إرسال الإيصال كـ <b>صورة</b> (JPG / PNG) أو <b>ملف PDF</b> حصراً.",
         reply_markup=cancel_action_keyboard(),
     )
 

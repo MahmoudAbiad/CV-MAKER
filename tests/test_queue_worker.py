@@ -141,6 +141,56 @@ async def test_process_receipt_screening_invalid_image_auto_reject(
     assert "لا تبدو كإيصال دفع صالح" in mock_bot.send_message.call_args[0][1]
 
 
+@pytest.mark.asyncio
+async def test_process_receipt_screening_pdf_success(
+    mock_bot: AsyncMock, monkeypatch: pytest.MonkeyPatch
+):
+    """التحقق من دعم فحص وتدقيق إيصالات الدفع المرسلة كملف PDF"""
+    payment_id = 77
+    chat_id = 987654
+    payload = {
+        "payment_id": payment_id,
+        "chat_id": chat_id,
+        "user_id": chat_id,
+        "receipt_file_id": "dummy_pdf_doc_123",
+        "is_pdf": True,
+    }
+
+    # بايتات PDF صالحة تبدأ بـ %PDF
+    pdf_dummy_bytes = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"
+    mock_file = MagicMock()
+    mock_file.file_size = 500
+    mock_file.file_path = "documents/receipt.pdf"
+    mock_bot.get_file = AsyncMock(return_value=mock_file)
+    mock_bot.download_file = AsyncMock(return_value=io.BytesIO(pdf_dummy_bytes))
+
+    mock_verdict = {
+        "is_receipt": True,
+        "confidence": 0.95,
+        "transaction_id": "TX998877",
+        "amount": "25000",
+        "recipient": "123456",
+        "reason": "إيصال شام كاش صالح ومطابق",
+    }
+    mock_verify = AsyncMock(return_value=mock_verdict)
+    monkeypatch.setattr("app.services.gemini_service.verify_payment_receipt", mock_verify)
+
+    mock_payment = {"amount": 0.20, "currency": "USD", "user_id": chat_id, "cv_record_id": 10}
+    monkeypatch.setattr(db, "get_payment", AsyncMock(return_value=mock_payment))
+    monkeypatch.setattr(db, "is_receipt_reused", AsyncMock(return_value=False))
+    monkeypatch.setattr(db, "is_transaction_id_reused", AsyncMock(return_value=False))
+    monkeypatch.setattr(db, "update_payment_transaction_id", AsyncMock(return_value=True))
+
+    await _process_receipt_screening(mock_bot, payload)
+
+    # التحقق من تمرير application/pdf لـ Gemini
+    mock_verify.assert_called_once_with(pdf_dummy_bytes, mime_type="application/pdf")
+    # التحقق من إرسال مستند PDF (send_document) للأدمن وليس كصورة
+    mock_bot.send_document.assert_called()
+    # التحقق من إرسال رسالة التأكيد للمستخدم
+    mock_bot.send_message.assert_called()
+
+
 def test_handlers_map_registry():
     """التحقق من تسجيل العمال الثلاثة في القاموس المعياري لطوابير Redis"""
     assert "queue:cv_generation" in _HANDLERS
