@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 from typing import Any
 
 from aiogram import Bot
@@ -69,16 +70,42 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
     except Exception:
         logger.exception("فشل حفظ سجل السيرة الذاتية بقاعدة البيانات للمستخدم %s", user_id)
 
-    safe_name = cv_data.get("full_name") or "candidate"
-    safe_name = str(safe_name).replace(" ", "_")
-    file_name = f"CV_{safe_name}.pdf"
+    raw_name = str(cv_data.get("full_name") or "candidate")
+    clean_name = re.sub(r'[^\w\u0600-\u06FF\-]', '_', raw_name).strip("_")
+    clean_name = clean_name[:40] or "candidate"
+    file_name = f"CV_{clean_name}.pdf"
 
-    await bot.send_document(
-        chat_id=chat_id,
-        document=BufferedInputFile(pdf_bytes, filename=file_name),
-        caption="🎉 <b>ألف مبروك! سيرتك الذاتية بصيغة PDF صارت جاهزة!</b>\n\nتمت صياغتها وتنسيقها بأعلى معايير الـ ATS العالمية. نتمنى لك كل التوفيق في مقابلاتك القادمة! 🍀✨",
-        parse_mode="HTML",
+    caption_text = (
+        "🎉 <b>ألف مبروك! سيرتك الذاتية بصيغة PDF صارت جاهزة!</b>\n\n"
+        "تمت صياغتها وتنسيقها بأعلى معايير الـ ATS العالمية. نتمنى لك كل التوفيق في مقابلاتك القادمة! 🍀✨"
     )
+    sent_successfully = False
+    try:
+        await bot.send_document(
+            chat_id=chat_id,
+            document=BufferedInputFile(pdf_bytes, filename=file_name),
+            caption=caption_text,
+            parse_mode="HTML",
+        )
+        sent_successfully = True
+    except Exception as exc1:
+        logger.warning("فشل إرسال ملف PDF بالاسم المخصص (%s)، جاري المحاولة باسم افتراضي...", exc1)
+        try:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=BufferedInputFile(pdf_bytes, filename="CV.pdf"),
+                caption="🎉 ألف مبروك! سيرتك الذاتية بصيغة PDF صارت جاهزة!",
+            )
+            sent_successfully = True
+        except Exception as exc2:
+            logger.exception("فشل نهائي في تسليم ملف PDF للمستخدم %s: %s", user_id, exc2)
+            await bot.send_message(
+                chat_id,
+                "⚠️ واجهنا صعوبة مؤقتة في إرسال ملف الـ PDF عبر تيليجرام. يرجى الضغط على زر الاعتماد مجدداً أو مراجعة الدعم.",
+            )
+
+    if not sent_successfully:
+        return
 
     if cv_id is not None:
         docx_usd, docx_syp = await db.get_docx_prices()

@@ -119,3 +119,56 @@ def test_registered_font_resolution():
     font_name = _get_registered_font()
     assert isinstance(font_name, str)
     assert len(font_name) > 0
+
+
+def test_pdf_generator_handles_string_skills_and_bullets():
+    """التحقق من مرونة المولد وقبوله للمهارات والنقاط كسلاسل نصية بدلاً من مصفوفات"""
+    cv_data = {
+        "full_name": "سامر العلي",
+        "title": "مطور برمجيات",
+        "summary": "خبرة واسعة في البناء والتطوير البرمجي.",
+        "skills": "Python, Django, PostgreSQL, Docker",
+        "languages": "العربية، الإنجليزية",
+        "experience": [
+            {
+                "role": "مبرمج بايثون",
+                "company": "شركة الحلول التقنية",
+                "period": "2020 - 2024",
+                "bullets": "- تطوير واجهات برمجة التطبيقات\n- تحسين أداء قواعد البيانات",
+            }
+        ],
+        "_language": "ar",
+    }
+    pdf_bytes = generate_cv_pdf(cv_data)
+    assert isinstance(pdf_bytes, bytes)
+    assert pdf_bytes.startswith(b"%PDF-")
+
+
+def test_pdf_generator_fallback_on_build_failure(monkeypatch):
+    """التحقق من عمل المولد الاحتياطي فائق الاعتمادية عند حدوث أي استثناء في التخطيط الأساسي"""
+    from reportlab.platypus import SimpleDocTemplate
+
+    original_build = SimpleDocTemplate.build
+    call_count = 0
+
+    def faulty_build(self, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("Simulated ReportLab Layout Error")
+        return original_build(self, *args, **kwargs)
+
+    monkeypatch.setattr(SimpleDocTemplate, "build", faulty_build)
+
+    cv_data = {
+        "full_name": "طارق النجار",
+        "title": "مهندس شبكات",
+        "summary": "ملخص مهني تفصيلي لمهندس شبكات.",
+        "skills": ["Cisco", "Linux", "Routing"],
+        "_language": "ar",
+    }
+    pdf_bytes = generate_cv_pdf(cv_data)
+    assert isinstance(pdf_bytes, bytes)
+    assert pdf_bytes.startswith(b"%PDF-")
+    assert call_count >= 2
+

@@ -98,3 +98,36 @@ async def dequeue_multi_blocking(queues: list[str], timeout: int = 30) -> tuple[
         await reset_redis()
         await asyncio.sleep(2.0)
         return None
+
+
+async def set_cache(key: str, value: str, expire: int = 86400) -> None:
+    """حفظ قيمة مؤقتة في Redis مع فترة صلاحية TTL."""
+    try:
+        r = get_redis()
+        await r.set(key, value, ex=expire)
+    except (RedisConnectionError, RedisTimeoutError, OSError):
+        await reset_redis()
+        try:
+            r = get_redis()
+            await r.set(key, value, ex=expire)
+        except Exception:
+            logger.warning("تعذر حفظ المفتاح %s في Redis", key)
+    except Exception:
+        logger.warning("خطأ أثناء حفظ المفتاح %s في Redis", key)
+
+
+async def get_cache(key: str) -> str | None:
+    """جلب قيمة مؤقتة من Redis."""
+    try:
+        r = get_redis()
+        return await r.get(key)
+    except (RedisConnectionError, RedisTimeoutError, OSError):
+        await reset_redis()
+        try:
+            r = get_redis()
+            return await r.get(key)
+        except Exception:
+            return None
+    except Exception:
+        return None
+

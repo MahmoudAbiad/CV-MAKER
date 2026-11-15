@@ -49,7 +49,7 @@ from app.bot.keyboards import (
     support_keyboard,
 )
 from app.config import settings
-from app.queue.redis_client import enqueue
+from app.queue.redis_client import enqueue, get_cache, set_cache
 from app.services import gemini_service
 from app.services.db import db
 
@@ -647,6 +647,12 @@ async def _run_completeness_check(
     await state.update_data(cv_data=result, style=style, language=language)
     await state.set_state(CvBuildStates.preview_dashboard)
 
+    try:
+        user_id = message.chat.id
+        await set_cache(f"draft_cv:{user_id}", json.dumps(result, ensure_ascii=False))
+    except Exception:
+        pass
+
     preview_text = _format_cv_preview(result, language=language, style=style)
     await message.answer(preview_text, reply_markup=cv_preview_dashboard_keyboard(style=style, lang=language))
 
@@ -782,6 +788,11 @@ async def handle_toggle_style(callback: CallbackQuery, state: FSMContext) -> Non
     cv_data["_language"] = language
 
     await state.update_data(style=new_style, cv_data=cv_data)
+    try:
+        user_id = callback.from_user.id if callback.from_user else callback.message.chat.id
+        await set_cache(f"draft_cv:{user_id}", json.dumps(cv_data, ensure_ascii=False))
+    except Exception:
+        pass
     label = "✨ تم تفعيل نمط التلميع (اضغط 'إعادة صياغة ذكية' لتطبيقه على النص)" if new_style == "enhanced" else "🖊️ تم تفعيل النمط الأصلي"
     await callback.answer(label, show_alert=False)
 
@@ -808,6 +819,11 @@ async def handle_toggle_language(callback: CallbackQuery, state: FSMContext) -> 
     cv_data["_style"] = style
 
     await state.update_data(language=new_lang, cv_data=cv_data)
+    try:
+        user_id = callback.from_user.id if callback.from_user else callback.message.chat.id
+        await set_cache(f"draft_cv:{user_id}", json.dumps(cv_data, ensure_ascii=False))
+    except Exception:
+        pass
     label = (
         "🌐 تم تحويل اللغة إلى English (اضغط 'إعادة صياغة ذكية' لترجمة المحتوى)"
         if new_lang == "en"
@@ -985,6 +1001,11 @@ async def handle_save_edited_section(message: Message, state: FSMContext) -> Non
     sanitized_cv["_style"] = style
     await state.update_data(cv_data=sanitized_cv)
     await state.set_state(CvBuildStates.preview_dashboard)
+    try:
+        user_id = message.from_user.id if message.from_user else message.chat.id
+        await set_cache(f"draft_cv:{user_id}", json.dumps(sanitized_cv, ensure_ascii=False))
+    except Exception:
+        pass
 
     await message.answer("✅ <b>تم تحديث القسم بنجاح!</b>")
     preview_text = _format_cv_preview(sanitized_cv, language=language, style=style)
@@ -1023,8 +1044,28 @@ async def handle_confirm_cv_generation(callback: CallbackQuery, state: FSMContex
     cv_data = data.get("cv_data")
 
     if not cv_data:
+        # استرجاع المسودة من Redis في حال فقدان الذاكرة أو إعادة تشغيل السيرفر
+        cached_draft = await get_cache(f"draft_cv:{user_id}")
+        if cached_draft:
+            try:
+                cv_data = json.loads(cached_draft)
+                logger.info("تم استرجاع مسودة السيرة الذاتية بنجاح من Redis للمستخدم %s", user_id)
+            except Exception:
+                pass
+
+    if not cv_data:
+        # محاولة استرجاع آخر سيرة من قاعدة البيانات كخيار بديل
+        try:
+            latest_rec = await db.get_latest_cv_record(user_id)
+            if latest_rec and latest_rec.get("parsed_json"):
+                cv_data = latest_rec["parsed_json"]
+                logger.info("تم استرجاع مسودة السيرة الذاتية من DB للمستخدم %s", user_id)
+        except Exception:
+            pass
+
+    if not cv_data:
         await state.clear()
-        await callback.message.answer("⚠️ حدث خطأ أو انتهت صلاحية الجلسة، يرجى البدء من جديد.")
+        await callback.message.answer("⚠️ حدث خطأ أو انتهت صلاحية الجلسة، يرجى البدء من جديد عبر إرسال بياناتك أو كتابة /start.")
         return
 
     cv_data = dict(cv_data)

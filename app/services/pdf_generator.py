@@ -11,6 +11,7 @@ from __future__ import annotations
 import gc
 import html
 import io
+import logging
 import os
 import re
 from pathlib import Path
@@ -27,6 +28,7 @@ from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Table, 
 
 _BASE_DIR = Path(__file__).resolve().parent.parent.parent
 _FONTS_DIR = _BASE_DIR / "assets" / "fonts"
+logger = logging.getLogger(__name__)
 
 _LABELS = {
     "ar": {
@@ -652,6 +654,8 @@ def generate_cv_pdf(cv_data: dict[str, Any]) -> bytes:
                     story.append(Paragraph(p_text(header_text, 10.5, bold=True), exp_header_style))
 
                 bullets = exp.get("bullets")
+                if isinstance(bullets, str):
+                    bullets = [b.strip("-*• ") for b in bullets.splitlines() if b.strip("-*• ")]
                 if isinstance(bullets, list):
                     dot_w = 4.5 * mm
                     txt_w = usable_w - dot_w
@@ -668,7 +672,7 @@ def generate_cv_pdf(cv_data: dict[str, Any]) -> bytes:
                             row = [[dot_para, b_para]]
                             col_widths = [dot_w, txt_w]
 
-                        bullet_table = Table(row, colWidths=col_widths)
+                        bullet_table = Table(row, colWidths=col_widths, splitByRow=1)
                         bullet_table.setStyle(
                             TableStyle(
                                 [
@@ -708,6 +712,8 @@ def generate_cv_pdf(cv_data: dict[str, Any]) -> bytes:
 
     # 6. المهارات
     skills = cv_data.get("skills")
+    if isinstance(skills, str):
+        skills = [s.strip() for s in re.split(r"[,،\n]+", skills) if s.strip()]
     if isinstance(skills, list):
         clean_skills = [_clean_str(s) for s in skills if _clean_str(s)]
         if clean_skills:
@@ -716,6 +722,8 @@ def generate_cv_pdf(cv_data: dict[str, Any]) -> bytes:
 
     # 7. اللغات
     languages = cv_data.get("languages")
+    if isinstance(languages, str):
+        languages = [l.strip() for l in re.split(r"[,،\n]+", languages) if l.strip()]
     if isinstance(languages, list):
         clean_langs = [_clean_str(l) for l in languages if _clean_str(l)]
         if clean_langs:
@@ -723,11 +731,196 @@ def generate_cv_pdf(cv_data: dict[str, Any]) -> bytes:
             story.append(Paragraph(p_text(item_sep.join(clean_langs), 10), base))
 
     try:
-        doc.build(story)
-        pdf_bytes = buffer.getvalue()
-        return pdf_bytes
+        try:
+            doc.build(story)
+            pdf_bytes = buffer.getvalue()
+            return pdf_bytes
+        except Exception as exc:
+            logger.warning(
+                "تعذر إتمام تخطيط PDF الأساسي (%s)، الانتقال التلقائي للمولد الاحتياطي فائق الاعتمادية.",
+                exc,
+                exc_info=True,
+            )
+            return _build_fallback_pdf(cv_data, is_arabic, primary_font, lat_reg, labels)
     finally:
         buffer.close()
         del story
         del doc
         gc.collect(1)
+
+
+def _build_fallback_pdf(
+    cv_data: dict[str, Any],
+    is_arabic: bool,
+    primary_font: str,
+    lat_font: str,
+    labels: dict[str, str],
+) -> bytes:
+    """مولّد احتياطي مبسط ومضمون 100% يعمل بدون جداول معقدة في حال فشل التخطيط الأساسي."""
+    buf = io.BytesIO()
+    try:
+        doc = SimpleDocTemplate(
+            buf,
+            pagesize=A4,
+            leftMargin=14 * mm,
+            rightMargin=14 * mm,
+            topMargin=12 * mm,
+            bottomMargin=12 * mm,
+        )
+        styles = getSampleStyleSheet()
+        align = TA_RIGHT if is_arabic else TA_LEFT
+
+        name_style = ParagraphStyle(
+            "FallbackName",
+            parent=styles["Normal"],
+            fontName=primary_font,
+            fontSize=16,
+            leading=22,
+            alignment=align,
+            textColor=colors.HexColor("#123A5E"),
+            spaceAfter=4,
+        )
+        title_style = ParagraphStyle(
+            "FallbackTitle",
+            parent=styles["Normal"],
+            fontName=primary_font,
+            fontSize=11,
+            leading=16,
+            alignment=align,
+            textColor=colors.HexColor("#374151"),
+            spaceAfter=6,
+        )
+        sec_style = ParagraphStyle(
+            "FallbackSec",
+            parent=styles["Normal"],
+            fontName=primary_font,
+            fontSize=12,
+            leading=18,
+            alignment=align,
+            textColor=colors.HexColor("#123A5E"),
+            spaceBefore=8,
+            spaceAfter=3,
+        )
+        body_style = ParagraphStyle(
+            "FallbackBody",
+            parent=styles["Normal"],
+            fontName=primary_font,
+            fontSize=9.5,
+            leading=14,
+            alignment=align,
+            textColor=colors.HexColor("#1F2937"),
+            spaceAfter=2,
+        )
+
+        def fb_text(txt: Any) -> str:
+            raw = _clean_str(txt)
+            if not raw:
+                return ""
+            visual = _reshape_text(raw, is_arabic)
+            return _tag_dual_fonts(visual, primary_font, lat_font)
+
+        story: list[Any] = []
+        name = _clean_str(cv_data.get("full_name") or ("السيرة الذاتية" if is_arabic else "Curriculum Vitae"))
+        story.append(Paragraph(fb_text(name), name_style))
+
+        title = _clean_str(cv_data.get("title"))
+        if title:
+            story.append(Paragraph(fb_text(title), title_style))
+
+        contact = cv_data.get("contact")
+        if isinstance(contact, dict):
+            c_parts = [_clean_str(contact.get(k)) for k in ("phone", "email", "location") if _clean_str(contact.get(k))]
+            if c_parts:
+                sep = "  •  "
+                story.append(Paragraph(fb_text(sep.join(c_parts)), body_style))
+
+        def add_fb_sec(h_text: str) -> None:
+            story.append(Paragraph(fb_text(h_text), sec_style))
+            story.append(
+                HRFlowable(
+                    width="100%",
+                    thickness=1,
+                    color=colors.HexColor("#123A5E"),
+                    spaceBefore=1,
+                    spaceAfter=4,
+                )
+            )
+
+        summary = _clean_str(cv_data.get("summary"))
+        if summary:
+            add_fb_sec(labels.get("summary", "النبذة المهنية"))
+            story.append(Paragraph(fb_text(summary), body_style))
+
+        experience = cv_data.get("experience")
+        if isinstance(experience, list) and experience:
+            add_fb_sec(labels.get("experience", "الخبرات العملية"))
+            for exp in experience:
+                if isinstance(exp, dict):
+                    role = _clean_str(exp.get("role"))
+                    company = _clean_str(exp.get("company"))
+                    period = _clean_str(exp.get("period"))
+                    h_parts = [p for p in (role, company) if p]
+                    h = " — ".join(h_parts)
+                    if period:
+                        h = f"{h} ({period})" if h else f"({period})"
+                    if h:
+                        story.append(Paragraph(fb_text(h), body_style))
+                    bullets = exp.get("bullets")
+                    if isinstance(bullets, str):
+                        bullets = [b.strip("-*• ") for b in bullets.splitlines() if b.strip("-*• ")]
+                    if isinstance(bullets, list):
+                        for b in bullets:
+                            b_str = _clean_str(b)
+                            if b_str:
+                                story.append(Paragraph(fb_text(f"• {b_str}"), body_style))
+
+        education = cv_data.get("education")
+        if isinstance(education, list) and education:
+            add_fb_sec(labels.get("education", "التعليم"))
+            for edu in education:
+                if isinstance(edu, dict):
+                    degree = _clean_str(edu.get("degree"))
+                    inst = _clean_str(edu.get("institution"))
+                    period = _clean_str(edu.get("period"))
+                    h_parts = [p for p in (degree, inst) if p]
+                    h = " — ".join(h_parts)
+                    if period:
+                        h = f"{h} ({period})" if h else f"({period})"
+                    if h:
+                        story.append(Paragraph(fb_text(h), body_style))
+
+        skills = cv_data.get("skills")
+        if isinstance(skills, str):
+            skills = [s.strip() for s in re.split(r"[,،\n]+", skills) if s.strip()]
+        if isinstance(skills, list):
+            s_clean = [_clean_str(s) for s in skills if _clean_str(s)]
+            if s_clean:
+                add_fb_sec(labels.get("skills", "المهارات"))
+                story.append(Paragraph(fb_text("  •  ".join(s_clean)), body_style))
+
+        languages = cv_data.get("languages")
+        if isinstance(languages, str):
+            languages = [l.strip() for l in re.split(r"[,،\n]+", languages) if l.strip()]
+        if isinstance(languages, list):
+            l_clean = [_clean_str(l) for l in languages if _clean_str(l)]
+            if l_clean:
+                add_fb_sec(labels.get("languages", "اللغات"))
+                story.append(Paragraph(fb_text("  •  ".join(l_clean)), body_style))
+
+        try:
+            doc.build(story)
+            return buf.getvalue()
+        except Exception:
+            # آخر خط دفاعي: استخدام تخطيط فائق البساطة بخط قياسي
+            buf.seek(0)
+            buf.truncate(0)
+            doc_minimal = SimpleDocTemplate(buf, pagesize=A4)
+            minimal_story = [
+                Paragraph(html.escape(name), styles["Heading1"]),
+                Paragraph(html.escape(_clean_str(cv_data.get("summary") or "")), styles["Normal"]),
+            ]
+            doc_minimal.build(minimal_story)
+            return buf.getvalue()
+    finally:
+        buf.close()
+
