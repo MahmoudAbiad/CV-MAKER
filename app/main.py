@@ -18,6 +18,7 @@ from aiogram.types import Update
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.bot.commands import setup_bot_commands
 from app.bot.handlers import admin_router, user_router
 from app.bot.middlewares import AdminOnlyMiddleware, ThrottlingMiddleware, UserRegistrationMiddleware
 from app.config import settings
@@ -121,7 +122,13 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("⚠️ فشل الاتصال الأولي بقاعدة بيانات Turso")
 
-    # 2. تسجيل الـ Webhook
+    # 2. تسجيل الـ Webhook وضبط قائمة الأوامر وزر المنيو
+    if settings.bot_token:
+        try:
+            await setup_bot_commands(bot)
+        except Exception:
+            logger.exception("⚠️ فشل تهيئة زر المنيو الجانبي وقائمة الأوامر")
+
     if settings.webhook_base_url and settings.bot_token:
         webhook_url = settings.webhook_base_url.rstrip("/") + settings.webhook_path
         await _setup_webhook_safe(webhook_url)

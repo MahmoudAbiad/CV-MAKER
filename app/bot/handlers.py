@@ -310,8 +310,18 @@ def _parse_education_edit(raw_text: str) -> list[dict[str, Any]]:
 # =====================================================================
 
 @user_router.message(CommandStart(), StateFilter("*"))
-async def cmd_start(message: Message, state: FSMContext) -> None:
+async def cmd_start(message: Message, state: FSMContext, bot: Bot | None = None) -> None:
     await state.clear()
+    # تفعيل قائمة أوامر المشرفين الخاصة للمشرف عند بدء المحادثة
+    if bot is not None and message.from_user and message.from_user.id in settings.admin_user_ids:
+        try:
+            from app.bot.commands import ADMIN_COMMANDS
+            from aiogram.types import BotCommandScopeChat, MenuButtonCommands
+            await bot.set_my_commands(commands=ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=message.from_user.id))
+            await bot.set_chat_menu_button(chat_id=message.from_user.id, menu_button=MenuButtonCommands())
+        except Exception:
+            pass
+
     await message.answer(
         WELCOME_TEXT,
         reply_markup=persistent_main_menu_keyboard(),
@@ -335,6 +345,7 @@ async def cmd_cancel(event: Message | CallbackQuery, state: FSMContext) -> None:
         await event.answer(text, reply_markup=persistent_main_menu_keyboard())
 
 
+@user_router.message(Command("new", "create"), StateFilter("*"))
 @user_router.message(F.text == "📄 بناء CV جديد", StateFilter("*"))
 @user_router.callback_query(F.data == "action:start_new_cv", StateFilter("*"))
 async def handle_menu_new_cv(event: Message | CallbackQuery, state: FSMContext) -> None:
@@ -374,6 +385,7 @@ async def handle_menu_new_cv(event: Message | CallbackQuery, state: FSMContext) 
         await event.answer(prompt, reply_markup=cancel_action_keyboard())
 
 
+@user_router.message(Command("help"), StateFilter("*"))
 @user_router.message(F.text == "ℹ️ تعليمات الاستخدام", StateFilter("*"))
 @user_router.callback_query(F.data == "action:how_it_works", StateFilter("*"))
 async def handle_menu_instructions(event: Message | CallbackQuery) -> None:
@@ -384,6 +396,7 @@ async def handle_menu_instructions(event: Message | CallbackQuery) -> None:
         await event.answer(USAGE_GUIDE_TEXT)
 
 
+@user_router.message(Command("pricing"), StateFilter("*"))
 @user_router.message(F.text == "💳 أسعار النسخ", StateFilter("*"))
 async def handle_menu_pricing(message: Message) -> None:
     docx_usd, docx_syp = await db.get_docx_prices()
@@ -410,6 +423,7 @@ async def handle_menu_pricing(message: Message) -> None:
     await message.answer(pricing_text, reply_markup=pricing_keyboard(), parse_mode="HTML")
 
 
+@user_router.message(Command("support"), StateFilter("*"))
 @user_router.message(F.text == "📞 الدعم الفني", StateFilter("*"))
 @user_router.callback_query(F.data == "action:support_info", StateFilter("*"))
 async def handle_menu_support(event: Message | CallbackQuery) -> None:
@@ -1422,9 +1436,11 @@ async def cmd_admin_panel(message: Message) -> None:
     await message.answer("🛠 <b>لوحة تحكم إدارة البوت</b>", reply_markup=admin_panel_keyboard())
 
 
+@admin_router.message(Command("stats"))
 @admin_router.callback_query(F.data == "admin_stats")
-async def handle_admin_stats(callback: CallbackQuery) -> None:
-    await callback.answer()
+async def handle_admin_stats(event: Message | CallbackQuery) -> None:
+    if isinstance(event, CallbackQuery):
+        await event.answer()
     stats = await db.get_stats()
     text = (
         "📊 <b>إحصائيات البوت:</b>\n\n"
@@ -1435,16 +1451,23 @@ async def handle_admin_stats(callback: CallbackQuery) -> None:
         f"✅ دفعات مقبولة: <b>{stats['payments_approved']}</b>\n"
         f"❌ دفعات مرفوضة: <b>{stats['payments_rejected']}</b>"
     )
-    await callback.message.answer(text)
+    if isinstance(event, CallbackQuery):
+        await event.message.answer(text, parse_mode="HTML")
+    else:
+        await event.answer(text, parse_mode="HTML")
 
 
+@admin_router.message(Command("broadcast"))
 @admin_router.callback_query(F.data == "admin_broadcast")
-async def handle_admin_broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
+async def handle_admin_broadcast_start(event: Message | CallbackQuery, state: FSMContext) -> None:
+    if isinstance(event, CallbackQuery):
+        await event.answer()
     await state.set_state(BroadcastStates.waiting_for_message)
-    await callback.message.answer(
-        "✍️ أرسل الآن نص الرسالة التي ترغب في بثها لجميع المستخدمين (أو /cancel للإلغاء):"
-    )
+    prompt = "✍️ أرسل الآن نص الرسالة التي ترغب في بثها لجميع المستخدمين (أو /cancel للإلغاء):"
+    if isinstance(event, CallbackQuery):
+        await event.message.answer(prompt)
+    else:
+        await event.answer(prompt)
 
 
 @admin_router.message(StateFilter(BroadcastStates.waiting_for_message), F.text, ~F.text.startswith("/"))
