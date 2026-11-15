@@ -13,6 +13,7 @@ import html
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from aiogram import Bot, F, Router
@@ -29,6 +30,7 @@ from aiogram.types import (
 from app.bot.keyboards import (
     admin_broadcast_confirm_keyboard,
     admin_panel_keyboard,
+    admin_pricing_keyboard,
     admin_reject_reasons_keyboard,
     admin_review_keyboard,
     cancel_action_keyboard,
@@ -42,6 +44,8 @@ from app.bot.keyboards import (
     payment_instructions_keyboard,
     persistent_main_menu_keyboard,
     pricing_keyboard,
+    quota_exhausted_keyboard,
+    quota_payment_instructions_keyboard,
     support_keyboard,
 )
 from app.config import settings
@@ -90,6 +94,21 @@ class BroadcastStates(StatesGroup):
 
 class RejectStates(StatesGroup):
     waiting_for_reason = State()
+
+
+class AdminPricingStates(StatesGroup):
+    waiting_for_price = State()
+
+
+def _get_renewal_info() -> tuple[str, int]:
+    """حساب تاريخ بداية الشهر القادم وعدد الأيام المتبقية للتجديد الشهري."""
+    now = datetime.now(timezone.utc)
+    if now.month == 12:
+        next_month = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        next_month = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
+    days_left = (next_month - now).days + 1
+    return next_month.strftime("%Y-%m-%d"), days_left
 
 
 # =====================================================================
@@ -320,6 +339,28 @@ async def cmd_cancel(event: Message | CallbackQuery, state: FSMContext) -> None:
 @user_router.callback_query(F.data == "action:start_new_cv", StateFilter("*"))
 async def handle_menu_new_cv(event: Message | CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    user_id = event.from_user.id if event.from_user else (event.chat.id if isinstance(event, Message) else event.message.chat.id)
+
+    # فحص الكوتة المتبقية للمستخدم لهذا الشهر
+    try:
+        quota = await db.get_user_quota(user_id)
+        if quota["total_available"] <= 0:
+            quota_price = await db.get_cv_quota_price_syp()
+            renewal_date, days_left = _get_renewal_info()
+            exhausted_msg = (
+                "⚠️ <b>لقد استنفدت رصيدك الشهري المجاني (10 سير ذاتية).</b>\n\n"
+                f"📅 <b>موعد التجديد التلقائي القادم:</b> {renewal_date} (بعد {days_left} يوم).\n\n"
+                f"💡 يمكنك الانتظار حتى موعد التجديد، أو شراء <b>باقة 10 سير إضافية</b> فوراً مقابل <b>{quota_price} ل.س</b> عبر شام كاش."
+            )
+            if isinstance(event, CallbackQuery):
+                await event.answer()
+                await event.message.answer(exhausted_msg, reply_markup=quota_exhausted_keyboard(quota_price), parse_mode="HTML")
+            else:
+                await event.answer(exhausted_msg, reply_markup=quota_exhausted_keyboard(quota_price), parse_mode="HTML")
+            return
+    except Exception:
+        logger.exception("فشل فحص كوتة المستخدم %s عند بدء سيرة جديدة", user_id)
+
     prompt = (
         "📄 <b>بدء بناء سيرة ذاتية جديدة:</b>\n\n"
         "أرسل لي نبذة شاملة عن خبراتك، دراستك، ومهاراتك (سواء بالعربية أو الإنجليزية، أو حتى باللهجة العامية).\n\n"
@@ -345,7 +386,28 @@ async def handle_menu_instructions(event: Message | CallbackQuery) -> None:
 
 @user_router.message(F.text == "💳 أسعار النسخ", StateFilter("*"))
 async def handle_menu_pricing(message: Message) -> None:
-    await message.answer(PRICING_TEXT, reply_markup=pricing_keyboard())
+    docx_usd, docx_syp = await db.get_docx_prices()
+    quota_syp = await db.get_cv_quota_price_syp()
+    user_id = message.from_user.id if message.from_user else message.chat.id
+    quota = await db.get_user_quota(user_id)
+    renewal_date, days_left = _get_renewal_info()
+
+    pricing_text = (
+        "💳 <b>باقات وأسعار السير الذاتية:</b>\n\n"
+        "📄 <b>الباقة الشهرية المجانية:</b>\n"
+        f"• <b>10 سير ذاتية مجاناً</b> كل شهر بصيغة PDF احترافية.\n"
+        f"• رصيدك المتبقي لهذا الشهر: <b>{quota['remaining_monthly']}</b> من 10.\n"
+        + (f"• رصيد باقاتك الإضافية المشتراة: <b>{quota['extra_balance']}</b> سيرة.\n" if quota['extra_balance'] > 0 else "")
+        + f"• إجمالي الرصيد المتاح لك الآن: <b>{quota['total_available']}</b> سيرة ذاتية.\n"
+        f"• موعد التجديد الشهري: <b>{renewal_date}</b> (بعد {days_left} يوم).\n\n"
+        "📦 <b>باقة السير الذاتية الإضافية (10 سير):</b>\n"
+        f"• السعر: <b>{quota_syp} ليرة سورية</b> عبر شام كاش.\n"
+        "• تُضاف لرصيدك فوراً وتبقى صالحة للاستخدام دون تاريخ انتهاء.\n\n"
+        "💼 <b>النسخة القابلة للتعديل (Word / DOCX):</b>\n"
+        f"• السعر الرمزي: <b>{docx_usd}$</b> (أو <b>{docx_syp} ليرة سورية</b>).\n"
+        "• مصادقة واعتماد فوري تلقائياً بالذكاء الاصطناعي (AI Instant Approval)."
+    )
+    await message.answer(pricing_text, reply_markup=pricing_keyboard(), parse_mode="HTML")
 
 
 @user_router.message(F.text == "📞 الدعم الفني", StateFilter("*"))
@@ -369,6 +431,24 @@ async def handle_menu_support(event: Message | CallbackQuery) -> None:
     StateFilter(None, CvBuildStates.waiting_for_text),
 )
 async def handle_free_text_cv(message: Message, state: FSMContext) -> None:
+    user_id = message.from_user.id if message.from_user else message.chat.id
+    # فحص الكوتة المتبقية
+    try:
+        quota = await db.get_user_quota(user_id)
+        if quota["total_available"] <= 0:
+            quota_price = await db.get_cv_quota_price_syp()
+            renewal_date, days_left = _get_renewal_info()
+            await message.answer(
+                "⚠️ <b>لقد استنفدت رصيدك الشهري المجاني (10 سير ذاتية).</b>\n\n"
+                f"📅 <b>موعد التجديد التلقائي القادم:</b> {renewal_date} (بعد {days_left} يوم).\n\n"
+                f"💡 يمكنك الانتظار حتى موعد التجديد، أو شراء <b>باقة 10 سير إضافية</b> فوراً مقابل <b>{quota_price} ل.س</b> عبر شام كاش.",
+                reply_markup=quota_exhausted_keyboard(quota_price),
+                parse_mode="HTML",
+            )
+            return
+    except Exception:
+        logger.exception("فشل فحص كوتة المستخدم %s عند إدخال النص", user_id)
+
     if not message.text or len(message.text.strip()) < 15:
         await message.answer(
             "🤔 النص قصير جداً لبناء سيرة ذاتية متكاملة. "
@@ -900,6 +980,25 @@ async def handle_save_edited_section(message: Message, state: FSMContext) -> Non
 )
 async def handle_confirm_cv_generation(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("تم اعتماد السيرة بنجاح!")
+    user_id = callback.from_user.id if callback.from_user else callback.message.chat.id
+
+    # التحقق من توفر رصيد كافي قبل الإرسال للطابور
+    try:
+        quota = await db.get_user_quota(user_id)
+        if quota["total_available"] <= 0:
+            quota_price = await db.get_cv_quota_price_syp()
+            renewal_date, days_left = _get_renewal_info()
+            await callback.message.answer(
+                "⚠️ <b>عذراً، لقد استنفدت رصيدك المتاح من السير الذاتية لهذا الشهر (10 سير).</b>\n\n"
+                f"📅 موعد التجديد القادم: {renewal_date} (بعد {days_left} يوم).\n"
+                f"يمكنك شراء باقة 10 سير إضافية مقابل {quota_price} ل.س للمتابعة فوراً.",
+                reply_markup=quota_exhausted_keyboard(quota_price),
+                parse_mode="HTML",
+            )
+            return
+    except Exception:
+        logger.exception("فشل فحص كوتة المستخدم %s عند اعتماد السيرة", user_id)
+
     data = await state.get_data()
     cv_data = data.get("cv_data")
 
@@ -934,7 +1033,7 @@ async def handle_confirm_cv_generation(callback: CallbackQuery, state: FSMContex
 
 
 # =====================================================================
-# مسار شراء نسخة Word (DOCX) والدفع عبر Sham Cash
+# مسار شراء نسخة Word (DOCX) وباقات السير عبر Sham Cash
 # =====================================================================
 
 @user_router.callback_query(F.data == "skip_docx")
@@ -954,14 +1053,15 @@ async def handle_skip_docx(callback: CallbackQuery) -> None:
 async def handle_buy_docx(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     cv_id = int(callback.data.split(":")[1])
-    await state.update_data(cv_id=cv_id)
+    await state.update_data(cv_id=cv_id, payment_type="docx")
 
+    docx_usd, docx_syp = await db.get_docx_prices()
     safe_code = html.escape(settings.sham_cash_code)
     caption = (
-        f"💳 <b>للحصول على نسخة Word قابلة للتعديل ({settings.docx_price_usd}$ / {settings.docx_price_syp} ل.س):</b>\n\n"
+        f"💳 <b>للحصول على نسخة Word قابلة للتعديل ({docx_usd}$ / {docx_syp} ل.س):</b>\n\n"
         f"🔢 كود التحويل (Sham Cash): <code>{safe_code}</code>\n\n"
         "1️⃣ حوّل المبلغ إلى الكود أعلاه أو عبر مسح QR المرفق.\n"
-        "2️⃣ بعد إتمام التحويل، اضغط على الزر أدناه وأرسل صورة الإشعار/الإيصال."
+        "2️⃣ بعد إتمام التحويل، اضغط على الزر أدناه وأرسل صورة الإشعار أو ملف PDF."
     )
 
     try:
@@ -976,11 +1076,69 @@ async def handle_buy_docx(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.answer(caption, parse_mode="HTML", reply_markup=payment_instructions_keyboard(cv_id))
 
 
+@user_router.callback_query(F.data == "buy_cv_quota")
+async def handle_buy_cv_quota(callback: CallbackQuery, state: FSMContext) -> None:
+    """مسار شراء باقة 10 سير ذاتية إضافية."""
+    await callback.answer()
+    quota_price = await db.get_cv_quota_price_syp()
+    safe_code = html.escape(settings.sham_cash_code)
+    await state.update_data(payment_type="cv_quota")
+
+    caption = (
+        f"💳 <b>شراء باقة 10 سير ذاتية إضافية ({quota_price} ل.س):</b>\n\n"
+        f"🔢 كود التحويل (Sham Cash): <code>{safe_code}</code>\n\n"
+        f"1️⃣ حوّل المبلغ ({quota_price} ليرة سورية) إلى الكود أعلاه أو عبر مسح QR المرفق.\n"
+        "2️⃣ بعد إتمام التحويل، اضغط على الزر أدناه وأرسل صورة أو ملف PDF لإشعار التحويل."
+    )
+
+    try:
+        await callback.message.answer_photo(
+            photo=FSInputFile(settings.qr_image_path),
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=quota_payment_instructions_keyboard(),
+        )
+    except Exception:
+        logger.exception("تعذر إرسال صورة QR لباقة الكوتة")
+        await callback.message.answer(caption, parse_mode="HTML", reply_markup=quota_payment_instructions_keyboard())
+
+
+@user_router.callback_query(F.data == "upload_quota_receipt")
+async def handle_upload_quota_receipt_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.update_data(payment_type="cv_quota")
+    await state.set_state(PaymentStates.waiting_for_receipt)
+    await callback.message.answer(
+        "📸 يرجى إرسال صورة إيصال التحويل أو ملف <b>PDF</b> الآن:",
+        reply_markup=cancel_action_keyboard(),
+    )
+
+
+@user_router.callback_query(F.data == "quota_info")
+async def handle_quota_info_callback(callback: CallbackQuery) -> None:
+    await callback.answer()
+    user_id = callback.from_user.id if callback.from_user else callback.message.chat.id
+    quota = await db.get_user_quota(user_id)
+    quota_price = await db.get_cv_quota_price_syp()
+    renewal_date, days_left = _get_renewal_info()
+
+    info_text = (
+        "📊 <b>تفاصيل رصيدك وسيرك الذاتية:</b>\n\n"
+        f"• السير المستهلكة هذا الشهر: <b>{quota['monthly_used']}</b> / {quota['monthly_limit']}\n"
+        f"• الرصيد الشهري المتبقي: <b>{quota['remaining_monthly']}</b>\n"
+        f"• رصيد الباقات الإضافية المشتراة: <b>{quota['extra_balance']}</b>\n"
+        f"• إجمالي الرصيد المتاح للإنشاء الآن: <b>{quota['total_available']}</b> سيرة\n\n"
+        f"📅 <b>موعد تجديد الرصيد الشهري:</b> {renewal_date} (بعد {days_left} يوم)\n\n"
+        f"💡 يمكنك زيادة رصيدك بـ 10 سير فوراً مقابل <b>{quota_price} ل.س</b>."
+    )
+    await callback.message.answer(info_text, reply_markup=quota_exhausted_keyboard(quota_price), parse_mode="HTML")
+
+
 @user_router.callback_query(F.data.startswith("upload_receipt:"))
 async def handle_upload_receipt_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     cv_id = int(callback.data.split(":")[1])
-    await state.update_data(cv_id=cv_id)
+    await state.update_data(cv_id=cv_id, payment_type="docx")
     await state.set_state(PaymentStates.waiting_for_receipt)
     await callback.message.answer(
         "📸 يرجى إرسال صورة إيصال التحويل أو ملف <b>PDF</b> الآن:",
@@ -994,9 +1152,10 @@ async def handle_upload_receipt_prompt(callback: CallbackQuery, state: FSMContex
 )
 async def handle_receipt_file(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
+    payment_type = data.get("payment_type") or ("cv_quota" if not data.get("cv_id") else "docx")
     cv_id = data.get("cv_id")
 
-    if not cv_id:
+    if payment_type == "docx" and not cv_id:
         await state.clear()
         await message.answer(
             "⚠️ عذراً، لم يتم العثور على السيرة الذاتية المرتبطة بهذا الإيصال (انتهت الجلسة).\n"
@@ -1049,12 +1208,28 @@ async def handle_receipt_file(message: Message, state: FSMContext) -> None:
     except Exception:
         logger.exception("فشل فحص تكرار الإيصال للمستخدم %s", message.from_user.id)
 
+    if payment_type == "docx":
+        docx_usd, _ = await db.get_docx_prices()
+        try:
+            amt = float(docx_usd)
+        except ValueError:
+            amt = 0.20
+        curr = "USD"
+    else:
+        quota_syp = await db.get_cv_quota_price_syp()
+        try:
+            amt = float(quota_syp)
+        except ValueError:
+            amt = 250.0
+        curr = "SYP"
+
     payment_id = await db.insert_payment(
         user_id=message.from_user.id,
-        amount=float(settings.docx_price_usd),
-        currency="USD",
+        amount=amt,
+        currency=curr,
         receipt_file_id=receipt_file_id,
         cv_record_id=cv_id,
+        payment_type=payment_type,
     )
     await state.clear()
 
@@ -1085,7 +1260,7 @@ async def handle_receipt_wrong_type(message: Message) -> None:
 # =====================================================================
 
 @admin_router.callback_query(F.data.startswith("approve:"))
-async def handle_admin_approve(callback: CallbackQuery) -> None:
+async def handle_admin_approve(callback: CallbackQuery, bot: Bot) -> None:
     payment_id = int(callback.data.split(":")[1])
     payment = await db.get_payment(payment_id)
     if payment is None:
@@ -1110,14 +1285,27 @@ async def handle_admin_approve(callback: CallbackQuery) -> None:
     except Exception:
         pass
 
-    await enqueue(
-        settings.queue_docx_generation,
-        {
-            "payment_id": payment_id,
-            "user_id": payment["user_id"],
-            "cv_record_id": payment["cv_record_id"],
-        },
-    )
+    if payment.get("payment_type") == "cv_quota" or not payment.get("cv_record_id"):
+        await db.add_extra_quota(payment["user_id"], count=settings.cv_package_size)
+        try:
+            await bot.send_message(
+                chat_id=payment["user_id"],
+                text=(
+                    f"🎉 <b>تمت الموافقة على طلب الدفع بنجاح!</b>\n\n"
+                    f"تمت إضافة <b>{settings.cv_package_size} سير ذاتية إضافية</b> إلى رصيدك. يمكنك الآن بدء بناء سيرة جديدة في أي وقت!"
+                ),
+            )
+        except Exception:
+            logger.exception("فشل إرسال إشعار تفعيل باقة السير للمستخدم %s", payment["user_id"])
+    else:
+        await enqueue(
+            settings.queue_docx_generation,
+            {
+                "payment_id": payment_id,
+                "user_id": payment["user_id"],
+                "cv_record_id": payment["cv_record_id"],
+            },
+        )
 
 
 @admin_router.callback_query(F.data.startswith("reject:"))
@@ -1320,3 +1508,82 @@ async def _run_safe_broadcast(bot: Bot, user_ids: list[int], text: str, status_m
         await status_msg.edit_text(f"✅ اكتمل البث بنجاح!\n\n📨 تم الإرسال: {sent}\n🚫 تعذر الإرسال: {failed}")
     except Exception:
         pass
+
+
+# =====================================================================
+# أوامر التحكم بالأسعار للوحة الأدمن
+# =====================================================================
+
+@admin_router.callback_query(F.data == "admin_pricing")
+async def handle_admin_pricing_menu(callback: CallbackQuery) -> None:
+    await callback.answer()
+    docx_usd, docx_syp = await db.get_docx_prices()
+    quota_syp = await db.get_cv_quota_price_syp()
+    text = (
+        "⚙️ <b>لوحة التحكم بأسعار الخدمات:</b>\n\n"
+        f"• سعر نسخة Word (ل.س): <b>{docx_syp} ل.س</b>\n"
+        f"• سعر نسخة Word (USD): <b>{docx_usd}$</b>\n"
+        f"• سعر باقة 10 سير ذاتية: <b>{quota_syp} ل.س</b>\n\n"
+        "👇 اضغط على أحد الأزرار بالأسفل لتعديل السعر:"
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=admin_pricing_keyboard(), parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=admin_pricing_keyboard(), parse_mode="HTML")
+
+
+@admin_router.callback_query(F.data == "admin_main")
+async def handle_admin_main_menu(callback: CallbackQuery) -> None:
+    await callback.answer()
+    try:
+        await callback.message.edit_text("🛠 <b>لوحة تحكم إدارة البوت</b>", reply_markup=admin_panel_keyboard(), parse_mode="HTML")
+    except Exception:
+        await callback.message.answer("🛠 <b>لوحة تحكم إدارة البوت</b>", reply_markup=admin_panel_keyboard(), parse_mode="HTML")
+
+
+@admin_router.callback_query(F.data.startswith("set_price:"))
+async def handle_admin_set_price_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    price_key = callback.data.split(":")[1]
+    name_map = {
+        "docx_price_syp": "سعر نسخة Word بالليرة السورية",
+        "docx_price_usd": "سعر نسخة Word بالدولار الأمريكي",
+        "cv_quota_price_syp": "سعر باقة 10 سير ذاتية بالليرة السورية",
+    }
+    label = name_map.get(price_key, price_key)
+    await state.update_data(target_price_key=price_key)
+    await state.set_state(AdminPricingStates.waiting_for_price)
+    await callback.answer()
+    await callback.message.answer(
+        f"✏️ <b>تعديل {label}:</b>\n\n"
+        "أرسل القيمة الرقمية الجديدة الآن (مثال: <code>300</code> أو <code>0.30</code>)، أو /cancel للإلغاء:"
+    )
+
+
+@admin_router.message(StateFilter(AdminPricingStates.waiting_for_price), F.text, ~F.text.startswith("/"))
+async def handle_admin_set_price_value(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    price_key = data.get("target_price_key")
+    raw_val = message.text.strip()
+
+    try:
+        num = float(raw_val)
+        if num <= 0:
+            raise ValueError()
+    except ValueError:
+        await message.answer("⚠️ يرجى إدخال رقم صحيح وموجب حصراً (مثال: 250 أو 0.20):")
+        return
+
+    clean_val = str(int(num)) if num.is_integer() else f"{num:.2f}"
+    await db.set_setting(price_key, clean_val)
+    await state.clear()
+
+    docx_usd, docx_syp = await db.get_docx_prices()
+    quota_syp = await db.get_cv_quota_price_syp()
+    text = (
+        f"✅ <b>تم تحديث السعر بنجاح إلى: {clean_val}!</b>\n\n"
+        "⚙️ <b>الأسعار الحالية بعد التعديل:</b>\n"
+        f"• سعر نسخة Word (ل.س): <b>{docx_syp} ل.س</b>\n"
+        f"• سعر نسخة Word (USD): <b>{docx_usd}$</b>\n"
+        f"• سعر باقة 10 سير ذاتية: <b>{quota_syp} ل.س</b>"
+    )
+    await message.answer(text, reply_markup=admin_pricing_keyboard(), parse_mode="HTML")

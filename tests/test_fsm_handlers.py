@@ -235,3 +235,58 @@ async def test_handle_more_info_reply_attaches_dialogue_context(
     assert data["last_question_text"] is None
     assert len(passed_raw_text) == 1
     assert "شركة الشام" in passed_raw_text[0]
+
+
+@pytest.mark.asyncio
+async def test_handle_free_text_blocks_when_quota_exhausted(
+    mock_message: Message, fsm_context: FSMContext, monkeypatch: pytest.MonkeyPatch
+):
+    """التحقق من أن إرسال نص جديد يُحظر عندما تنفد كوتة الـ 10 سير ذاتية"""
+    from app.services.db import db
+    mock_quota = {
+        "total_available": 0,
+        "monthly_used": 10,
+        "monthly_limit": 10,
+        "remaining_monthly": 0,
+        "extra_balance": 0,
+        "reset_month": "2026-11",
+    }
+    monkeypatch.setattr(db, "get_user_quota", AsyncMock(return_value=mock_quota))
+    monkeypatch.setattr(db, "get_cv_quota_price_syp", AsyncMock(return_value="250"))
+
+    mock_message.text = "أنا مهندس برمجيات ولدي خبرة 5 سنوات في بايثون ودجانغو"
+    await handle_free_text_cv(mock_message, fsm_context)
+
+    mock_message.answer.assert_called_once()
+    reply_text = mock_message.answer.call_args[0][0]
+    assert "استنفدت رصيدك" in reply_text
+    assert "250" in reply_text
+    # التأكد من عدم الانتقال لحالة النمط
+    current_state = await fsm_context.get_state()
+    assert current_state is None
+
+
+@pytest.mark.asyncio
+async def test_admin_set_price_value(
+    mock_message: Message, fsm_context: FSMContext, monkeypatch: pytest.MonkeyPatch
+):
+    """التحقق من استقبال الأدمن وتحديثه لأسعار الخدمات بنجاح"""
+    from app.bot.handlers import AdminPricingStates, handle_admin_set_price_value
+    from app.services.db import db
+
+    await fsm_context.set_state(AdminPricingStates.waiting_for_price)
+    await fsm_context.update_data(target_price_key="cv_quota_price_syp")
+
+    mock_set = AsyncMock()
+    monkeypatch.setattr(db, "set_setting", mock_set)
+    monkeypatch.setattr(db, "get_docx_prices", AsyncMock(return_value=("0.20", "25")))
+    monkeypatch.setattr(db, "get_cv_quota_price_syp", AsyncMock(return_value="350"))
+
+    mock_message.text = "350"
+    await handle_admin_set_price_value(mock_message, fsm_context)
+
+    mock_set.assert_called_once_with("cv_quota_price_syp", "350")
+    current_state = await fsm_context.get_state()
+    assert current_state is None
+    mock_message.answer.assert_called_once()
+    assert "تم تحديث السعر بنجاح" in mock_message.answer.call_args[0][0]

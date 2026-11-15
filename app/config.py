@@ -64,6 +64,9 @@ class Settings:
     sham_cash_code: str = field(default_factory=lambda: _get_env("SHAM_CASH_CODE"))
     docx_price_usd: str = field(default_factory=lambda: _get_env("DOCX_PRICE_USD", "0.20"))
     docx_price_syp: str = field(default_factory=lambda: _get_env("DOCX_PRICE_SYP", "25"))
+    cv_quota_price_syp: str = field(default_factory=lambda: _get_env("CV_QUOTA_PRICE_SYP", "250"))
+    cv_monthly_limit: int = field(default_factory=lambda: _get_int("CV_MONTHLY_LIMIT", 10))
+    cv_package_size: int = field(default_factory=lambda: _get_int("CV_PACKAGE_SIZE", 10))
     qr_image_path: str = field(default_factory=lambda: _get_env("QR_IMAGE_PATH", "./assets/sham_cash_qr.jpeg"))
 
     # --- Redis queue names ---

@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS payments (
     cv_record_id      INTEGER REFERENCES cv_records(id) ON DELETE SET NULL,
     amount            REAL NOT NULL,
     currency          TEXT NOT NULL DEFAULT 'SYP',
+    payment_type      TEXT NOT NULL DEFAULT 'docx' CHECK (payment_type IN ('docx', 'cv_quota')),
     receipt_file_id   TEXT NOT NULL,            -- file_id الخاص بصورة الإيصال في تيليجرام
     transaction_id    TEXT,                      -- رقم العملية المستخرج من الإيصال لمنع التكرار
     status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
@@ -52,13 +53,36 @@ CREATE TABLE IF NOT EXISTS payments (
 
 CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);
 CREATE INDEX IF NOT EXISTS idx_payments_cv_record_id ON payments(cv_record_id);
+CREATE INDEX IF NOT EXISTS idx_payments_payment_type ON payments(payment_type);
 CREATE INDEX IF NOT EXISTS idx_payments_receipt_file_id ON payments(receipt_file_id);
 CREATE INDEX IF NOT EXISTS idx_payments_transaction_id ON payments(transaction_id);
 CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
 CREATE INDEX IF NOT EXISTS idx_payments_created_at ON payments(created_at);
 
 -- ---------------------------------------------------------------
--- 4. مشغّل لتحديث حقل updated_at تلقائياً عند تعديل أي دفعة
+-- 4. جدول كوتة السير الذاتية لكل مستخدم (الحد الشهري والباقات الإضافية)
+-- ---------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS user_quotas (
+    user_id             INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+    monthly_used        INTEGER NOT NULL DEFAULT 0,
+    extra_balance       INTEGER NOT NULL DEFAULT 0,
+    reset_month         TEXT NOT NULL,          -- بصيغة YYYY-MM لإعادة التعيين الشهري التلقائي
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_quotas_reset_month ON user_quotas(reset_month);
+
+-- ---------------------------------------------------------------
+-- 5. جدول إعدادات التطبيق الديناميكية (الأسعار والتحكم)
+-- ---------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS app_settings (
+    key                 TEXT PRIMARY KEY,
+    value               TEXT NOT NULL,
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ---------------------------------------------------------------
+-- 6. مشغّل لتحديث حقل updated_at تلقائياً عند تعديل أي دفعة
 -- ---------------------------------------------------------------
 CREATE TRIGGER IF NOT EXISTS trg_payments_updated_at
 AFTER UPDATE ON payments

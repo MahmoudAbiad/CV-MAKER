@@ -212,3 +212,106 @@ async def test_get_all_user_ids(test_db: Database):
     assert isinstance(user_ids, list)
     assert 100101 in user_ids
     assert 100102 in user_ids
+
+
+@pytest.mark.asyncio
+async def test_user_quota_monthly_limit_and_consumption(test_db: Database):
+    """التحقق من كوتة الـ 10 سير شهرياً والاستهلاك وإضافة الرصيد الإضافي"""
+    user_id = 900101
+    await test_db.ensure_user_exists(user_id)
+
+    # 1. فحص الكوتة الأولية للمستخدم
+    quota = await test_db.get_user_quota(user_id)
+    assert quota["monthly_used"] == 0
+    assert quota["monthly_limit"] == 10
+    assert quota["remaining_monthly"] == 10
+    assert quota["extra_balance"] == 0
+    assert quota["total_available"] == 10
+
+    # 2. استهلاك 9 سير
+    for _ in range(9):
+        consumed = await test_db.consume_user_quota(user_id)
+        assert consumed is True
+
+    quota = await test_db.get_user_quota(user_id)
+    assert quota["monthly_used"] == 9
+    assert quota["remaining_monthly"] == 1
+    assert quota["total_available"] == 1
+
+    # 3. استهلاك السيرة العاشرة (استنفاد الكوتة الشهرية)
+    consumed = await test_db.consume_user_quota(user_id)
+    assert consumed is True
+
+    quota = await test_db.get_user_quota(user_id)
+    assert quota["monthly_used"] == 10
+    assert quota["remaining_monthly"] == 0
+    assert quota["total_available"] == 0
+
+    # 4. محاولة استهلاك سيرة إضافية دون رصيد
+    consumed = await test_db.consume_user_quota(user_id)
+    assert consumed is False
+
+    # 5. شراء باقة 10 سير إضافية
+    await test_db.add_extra_quota(user_id, count=10)
+    quota = await test_db.get_user_quota(user_id)
+    assert quota["monthly_used"] == 10
+    assert quota["remaining_monthly"] == 0
+    assert quota["extra_balance"] == 10
+    assert quota["total_available"] == 10
+
+    # 6. استهلاك سيرة من الرصيد الإضافي المشتَرى
+    consumed = await test_db.consume_user_quota(user_id)
+    assert consumed is True
+    quota = await test_db.get_user_quota(user_id)
+    assert quota["extra_balance"] == 9
+    assert quota["total_available"] == 9
+
+
+@pytest.mark.asyncio
+async def test_dynamic_app_settings_and_prices(test_db: Database):
+    """التحقق من حفظ واسترجاع إعدادات الأسعار الديناميكية في app_settings"""
+    # 1. القيم الافتراضية
+    usd, syp = await test_db.get_docx_prices()
+    assert usd != ""
+    assert syp != ""
+
+    quota_price = await test_db.get_cv_quota_price_syp()
+    assert quota_price != ""
+
+    # 2. تعديل الأسعار عبر set_setting
+    await test_db.set_setting("docx_price_syp", "350")
+    await test_db.set_setting("docx_price_usd", "0.35")
+    await test_db.set_setting("cv_quota_price_syp", "300")
+
+    usd_new, syp_new = await test_db.get_docx_prices()
+    assert syp_new == "350"
+    assert usd_new == "0.35"
+
+    quota_new = await test_db.get_cv_quota_price_syp()
+    assert quota_new == "300"
+
+
+@pytest.mark.asyncio
+async def test_insert_and_get_payment_with_quota_type(test_db: Database):
+    """التحقق من تسجيل دفعة شراء باقة كوتة السير بدون cv_record_id واسترجاعها بدقة"""
+    user_id = 900102
+    await test_db.ensure_user_exists(user_id)
+
+    pid = await test_db.insert_payment(
+        user_id=user_id,
+        amount=250.0,
+        currency="SYP",
+        receipt_file_id="quota_receipt_file_99",
+        cv_record_id=None,
+        payment_type="cv_quota",
+    )
+    assert isinstance(pid, int)
+    assert pid > 0
+
+    pay = await test_db.get_payment(pid)
+    assert pay is not None
+    assert pay["user_id"] == user_id
+    assert pay["amount"] == 250.0
+    assert pay["currency"] == "SYP"
+    assert pay["cv_record_id"] is None
+    assert pay["payment_type"] == "cv_quota"

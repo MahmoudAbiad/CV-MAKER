@@ -164,6 +164,7 @@ def pricing_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📄 ابدأ بناء سيرة ذاتية مجاناً", callback_data="action:start_new_cv")],
+            [InlineKeyboardButton(text="💳 شراء باقة 10 سير إضافية", callback_data="buy_cv_quota")],
             [InlineKeyboardButton(text="💬 استفسار عن الدفع", callback_data="action:support_info")],
         ]
     )
@@ -180,19 +181,48 @@ def support_keyboard() -> InlineKeyboardMarkup:
 
 
 # =====================================================================
-# 5. لوحات المفاتيح الخاصة بالدفع ونسخة Word (DOCX)
+# 5. لوحات المفاتيح الخاصة بالدفع ونسخة Word (DOCX) وباقات السير الذاتية
 # =====================================================================
 
-def docx_offer_keyboard(cv_id: int) -> InlineKeyboardMarkup:
+def docx_offer_keyboard(
+    cv_id: int, price_usd: str | None = None, price_syp: str | None = None
+) -> InlineKeyboardMarkup:
+    usd = price_usd or settings.docx_price_usd
+    syp = price_syp or settings.docx_price_syp
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"💳 شراء نسخة Word ({settings.docx_price_usd}$ / {settings.docx_price_syp} ل.س)",
+                    text=f"💳 شراء نسخة Word ({usd}$ / {syp} ل.س)",
                     callback_data=f"buy_docx:{cv_id}",
                 )
             ],
             [InlineKeyboardButton(text="لا شكراً، تكفيني نسخة PDF 👍", callback_data="skip_docx")],
+        ]
+    )
+
+
+def quota_exhausted_keyboard(quota_price: str = "250") -> InlineKeyboardMarkup:
+    """لوحة خيارات تظهر عند استنفاد الرصيد الشهري للسير الذاتية."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"💳 شراء 10 سير ذاتية إضافية ({quota_price} ل.س)",
+                    callback_data="buy_cv_quota",
+                )
+            ],
+            [InlineKeyboardButton(text="ℹ️ معلومات الكوتة والتجديد", callback_data="quota_info")],
+        ]
+    )
+
+
+def quota_payment_instructions_keyboard() -> InlineKeyboardMarkup:
+    """لوحة تعليمات الدفع لباقة السير الذاتية الإضافية."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📤 رفع إيصال التحويل الآن", callback_data="upload_quota_receipt")],
+            [InlineKeyboardButton(text="❌ إلغاء", callback_data="action:cancel")],
         ]
     )
 
@@ -256,6 +286,19 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats")],
+            [InlineKeyboardButton(text="⚙️ التحكم بالأسعار", callback_data="admin_pricing")],
             [InlineKeyboardButton(text="📢 إرسال رسالة جماعية", callback_data="admin_broadcast")],
+        ]
+    )
+
+
+def admin_pricing_keyboard() -> InlineKeyboardMarkup:
+    """لوحة التحكم بالأسعار للأدمن."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ سعر Word بالليرة السورية", callback_data="set_price:docx_price_syp")],
+            [InlineKeyboardButton(text="✏️ سعر Word بالدولار ($)", callback_data="set_price:docx_price_usd")],
+            [InlineKeyboardButton(text="✏️ سعر باقة 10 سير (ل.س)", callback_data="set_price:cv_quota_price_syp")],
+            [InlineKeyboardButton(text="⬅️ العودة للوحة الإدارة", callback_data="admin_main")],
         ]
     )

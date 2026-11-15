@@ -175,19 +175,27 @@ async def test_process_receipt_screening_pdf_success(
     mock_verify = AsyncMock(return_value=mock_verdict)
     monkeypatch.setattr("app.services.gemini_service.verify_payment_receipt", mock_verify)
 
-    mock_payment = {"amount": 0.20, "currency": "USD", "user_id": chat_id, "cv_record_id": 10}
+    mock_payment = {"amount": 0.20, "currency": "USD", "user_id": chat_id, "cv_record_id": 10, "payment_type": "docx"}
     monkeypatch.setattr(db, "get_payment", AsyncMock(return_value=mock_payment))
     monkeypatch.setattr(db, "is_receipt_reused", AsyncMock(return_value=False))
     monkeypatch.setattr(db, "is_transaction_id_reused", AsyncMock(return_value=False))
     monkeypatch.setattr(db, "update_payment_transaction_id", AsyncMock(return_value=True))
+    mock_update_status = AsyncMock(return_value=True)
+    monkeypatch.setattr(db, "update_payment_status", mock_update_status)
+    mock_enqueue = AsyncMock(return_value="job_docx_123")
+    monkeypatch.setattr("app.queue.worker.enqueue", mock_enqueue)
 
     await _process_receipt_screening(mock_bot, payload)
 
     # التحقق من تمرير application/pdf لـ Gemini
     mock_verify.assert_called_once_with(pdf_dummy_bytes, mime_type="application/pdf")
-    # التحقق من إرسال مستند PDF (send_document) للأدمن وليس كصورة
+    # التحقق من الاعتماد التلقائي بواسطة الذكاء الاصطناعي وإدراج توليد Word بالطابور
+    mock_update_status.assert_called_once()
+    assert mock_update_status.call_args[0][1] == "approved"
+    mock_enqueue.assert_called_once()
+    # التحقق من إرسال مستند PDF (send_document) للأدمن كإشعار اعتماد آلي
     mock_bot.send_document.assert_called()
-    # التحقق من إرسال رسالة التأكيد للمستخدم
+    # التحقق من إرسال رسالة التأكيد والاعتماد للمستخدم
     mock_bot.send_message.assert_called()
 
 
@@ -221,3 +229,86 @@ async def test_dequeue_multi_blocking_backoff_on_connection_error(monkeypatch: p
     result = await dequeue_multi_blocking(["test_queue"], timeout=30)
     assert result is None
     assert 2.0 in sleep_called_with
+
+
+@pytest.mark.asyncio
+async def test_receipt_screening_fake_ai_generated_goes_to_manual_review(
+    mock_bot: AsyncMock, monkeypatch: pytest.MonkeyPatch
+):
+    """التحقق من أن الإيصال المصطنع بالـ AI لا يُعتمد آلياً بل يحال للمراجعة اليدوية"""
+    payment_id = 88
+    chat_id = 998877
+    payload = {
+        "payment_id": payment_id,
+        "chat_id": chat_id,
+        "user_id": chat_id,
+        "receipt_file_id": "fake_ai_receipt_id",
+        "is_pdf": False,
+    }
+
+    dummy_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 30
+    mock_file = MagicMock()
+    mock_file.file_size = 500
+    mock_file.file_path = "photos/receipt.jpg"
+    mock_bot.get_file = AsyncMock(return_value=mock_file)
+    mock_bot.download_file = AsyncMock(return_value=io.BytesIO(dummy_jpeg))
+
+    # نتيجة الفحص تكشف أنه مولد بالذكاء الاصطناعي (is_ai_generated: True)
+    mock_verdict = {
+        "is_receipt": True,
+        "is_ai_generated": True,
+        "confidence": 0.85,
+        "transaction_id": "TX_AI_FAKE",
+        "amount": "25000",
+        "recipient": "123456",
+        "reason": "صورة مصطنعة ومولدة عبر الذكاء الاصطناعي",
+    }
+    monkeypatch.setattr("app.services.gemini_service.verify_payment_receipt", AsyncMock(return_value=mock_verdict))
+
+    mock_payment = {"amount": 0.20, "currency": "USD", "user_id": chat_id, "cv_record_id": 11, "payment_type": "docx"}
+    monkeypatch.setattr(db, "get_payment", AsyncMock(return_value=mock_payment))
+    monkeypatch.setattr(db, "is_receipt_reused", AsyncMock(return_value=False))
+    monkeypatch.setattr(db, "is_transaction_id_reused", AsyncMock(return_value=False))
+    monkeypatch.setattr(db, "update_payment_transaction_id", AsyncMock(return_value=True))
+
+    mock_update_status = AsyncMock(return_value=True)
+    monkeypatch.setattr(db, "update_payment_status", mock_update_status)
+    mock_enqueue = AsyncMock()
+    monkeypatch.setattr("app.queue.worker.enqueue", mock_enqueue)
+
+    await _process_receipt_screening(mock_bot, payload)
+
+    # يجب ألا تتم الموافقة التلقائية، ويجب ألا يُدرج في طابور docx
+    mock_update_status.assert_not_called()
+    mock_enqueue.assert_not_called()
+    # يجب إرسال الإشعار للأدمن مع أزرار المراجعة والرفض اليدوي
+    mock_bot.send_photo.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_cv_generation_blocks_when_quota_exhausted(
+    mock_bot: AsyncMock, monkeypatch: pytest.MonkeyPatch
+):
+    """التحقق من أن عامل توليد السيرة يرفض العملية عند استنفاد كوتة المستخدم"""
+    user_id = 554433
+    payload = {
+        "chat_id": user_id,
+        "user_id": user_id,
+        "cv_data": {"full_name": "Test User"},
+    }
+
+    # محاكاة كوتة مستنفدة (0 متبقي)
+    mock_quota = {"total_available": 0, "monthly_used": 10, "remaining_monthly": 0, "extra_balance": 0}
+    monkeypatch.setattr(db, "get_user_quota", AsyncMock(return_value=mock_quota))
+    monkeypatch.setattr(db, "get_cv_quota_price_syp", AsyncMock(return_value="250"))
+    mock_consume = AsyncMock()
+    monkeypatch.setattr(db, "consume_user_quota", mock_consume)
+
+    await _process_cv_generation(mock_bot, payload)
+
+    # يجب عدم خصم أي رصيد
+    mock_consume.assert_not_called()
+    # إرسال رسالة نفاد الرصيد للمستخدم
+    mock_bot.send_message.assert_called()
+    sent_text = mock_bot.send_message.call_args[0][1]
+    assert "استنفدت رصيدك" in sent_text

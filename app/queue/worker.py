@@ -29,6 +29,21 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
     user_id = payload["user_id"]
     cv_data = payload["cv_data"]
 
+    # فحص الكوتة المتاحة قبل استهلاك موارد المعالجة
+    try:
+        quota = await db.get_user_quota(user_id)
+        if quota["total_available"] <= 0:
+            logger.warning("المستخدم %s تجاوز حد الكوتة المسموح", user_id)
+            quota_price = await db.get_cv_quota_price_syp()
+            await bot.send_message(
+                chat_id,
+                f"⚠️ <b>لقد استنفدت رصيدك المتاح من السير الذاتية لهذا الشهر (10 سير).</b>\n\n"
+                f"يمكنك الانتظار حتى بداية الشهر القادم أو شراء <b>باقة 10 سير إضافية</b> مقابل <b>{quota_price} ل.س</b>.",
+            )
+            return
+    except Exception:
+        logger.exception("فشل فحص كوتة المستخدم %s في عامل التوليد", user_id)
+
     try:
         await bot.send_chat_action(chat_id, "upload_document")
     except Exception:
@@ -41,6 +56,12 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
         logger.exception("فشل توليد ملف PDF")
         await bot.send_message(chat_id, "⚠️ حدث خطأ أثناء توليد ملف PDF. حاول مرة أخرى.")
         return
+
+    # خصم سيرة واحدة من رصيد المستخدم
+    try:
+        await db.consume_user_quota(user_id)
+    except Exception:
+        logger.exception("فشل خصم كوتة المستخدم %s", user_id)
 
     cv_id: int | None = None
     try:
@@ -60,11 +81,17 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
     )
 
     if cv_id is not None:
+        docx_usd, docx_syp = await db.get_docx_prices()
         docx_prompt = (
             "💡 <b>بتحب تعدل بياناتك أو تضيف خبرات جديدة بالمستقبل؟</b>\n\n"
             "تقدر تحصل على نسخة <b>Word (DOCX)</b> المفتوحة لتعدل وتضيف عليها بأي وقت وبكل سهولة من موبايلك أو لابتوبك."
         )
-        await bot.send_message(chat_id, docx_prompt, parse_mode="HTML", reply_markup=docx_offer_keyboard(cv_id))
+        await bot.send_message(
+            chat_id,
+            docx_prompt,
+            parse_mode="HTML",
+            reply_markup=docx_offer_keyboard(cv_id, price_usd=docx_usd, price_syp=docx_syp),
+        )
     else:
         retry_msg = (
             "⚠️ تم إرسال ملف PDF بنجاح، لكن حدث خطأ مؤقت أثناء حفظ سجلك. "
@@ -169,6 +196,7 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
         logger.error("لم يتم العثور على سجل الدفعة %s", payment_id)
         return
 
+    payment_type = payment.get("payment_type") or ("cv_quota" if payment.get("cv_record_id") is None else "docx")
     tx_id = (verdict.get("transaction_id") or "").strip()
     amt = verdict.get("amount") or "-"
     recipient = verdict.get("recipient") or "-"
@@ -187,25 +215,17 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
         except Exception:
             logger.exception("خطأ أثناء تدقيق وحفظ رقم المعاملة %s", tx_id)
 
-    # 6. تنسيق آمن لإشعار الأدمن بصيغة HTML محصنة ضد الكسر وحقن Markdown
+    # تجهيز النصوص والبيانات الآمنة
     safe_tx_id = html.escape(tx_id or "-")
     safe_amt = html.escape(str(amt))
     safe_recipient = html.escape(str(recipient))
     safe_reason = html.escape(str(verdict.get("reason", "-")))
-    conf = verdict.get("confidence", 0.0) or 0.0
+    conf = float(verdict.get("confidence", 0.0) or 0.0)
+    is_valid_receipt = verdict.get("is_receipt") is True
+    is_ai_generated = bool(verdict.get("is_ai_generated", False))
     file_type_badge = "📄 مستند PDF" if is_pdf else "🖼️ صورة إيصال"
 
-    caption = (
-        f"🧾 <b>طلب دفع جديد #{payment_id}</b> ({file_type_badge})\n"
-        f"👤 معرّف المستخدم: <code>{user_id}</code>\n"
-        f"💵 المبلغ المطلوب: {payment['amount']} {payment['currency']}\n"
-        f"🔢 رقم المعاملة بالإيصال: <code>{safe_tx_id}</code>\n"
-        f"💰 المبلغ المرصود: {safe_amt}\n"
-        f"🎯 المستفيد: {safe_recipient}\n"
-        f"🤖 تقييم الفحص: {safe_reason} (ثقة {conf:.2f})"
-    )
-
-    # 7. إرسال الإشعار لجهات الإدارة (المجموعة و/أو المشرفين المباشرين بحصانة من التعليق)
+    # قائمة وجهات الإدارة
     admin_targets: list[int] = []
     if settings.admin_group_id and settings.admin_group_id != 0:
         admin_targets.append(settings.admin_group_id)
@@ -213,6 +233,109 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
         for aid in settings.admin_user_ids:
             if aid not in admin_targets and aid != 0:
                 admin_targets.append(aid)
+
+    # ------------------------------------------------------------------
+    # 6. المصادقة التلقائية بالذكاء الاصطناعي لنسخة Word (DOCX) وباقات السير
+    # إذا تأكد الذكاء الاصطناعي أن الإيصال حقيقي وغير مولد بالـ AI
+    # ------------------------------------------------------------------
+    if is_valid_receipt and not is_ai_generated and conf >= 0.70:
+        if payment_type == "docx":
+            # اعتماد فوري لنسخة Word
+            await db.update_payment_status(
+                payment_id,
+                "approved",
+                admin_note=f"موافقة تلقائية بالذكاء الاصطناعي (ثقة {conf:.2f})",
+            )
+            await enqueue(
+                settings.queue_docx_generation,
+                {
+                    "payment_id": payment_id,
+                    "user_id": user_id,
+                    "cv_record_id": payment["cv_record_id"],
+                },
+            )
+            try:
+                await bot.send_message(
+                    chat_id,
+                    "✅ <b>تم التحقق من إيصال الدفع بنجاح واعتماده تلقائياً بواسطة الذكاء الاصطناعي!</b>\n\n"
+                    "⏳ جاري تصميم وتجهيز ملف Word القابل للتعديل وإرساله لك فوراً...",
+                )
+            except Exception:
+                logger.exception("فشل إرسال إشعار الاعتماد التلقائي للمستخدم %s", chat_id)
+
+            auto_caption = (
+                f"⚡️ <b>دفعة معتمدة تلقائياً بالـ AI #{payment_id}</b> ({file_type_badge})\n"
+                f"👤 المستخدم: <code>{user_id}</code>\n"
+                f"💼 الخدمة: <b>نسخة Word (DOCX)</b>\n"
+                f"💵 المبلغ المطلوب: {payment['amount']} {payment['currency']}\n"
+                f"🔢 رقم المعاملة بالإيصال: <code>{safe_tx_id}</code>\n"
+                f"💰 المبلغ المرصود: {safe_amt}\n"
+                f"🎯 المستفيد: {safe_recipient}\n"
+                f"🤖 تقييم الذكاء الاصطناعي: {safe_reason} (ثقة {conf:.2f})\n"
+                "🟢 <i>تم اعتماد الطلب وتوليد ملف Word تلقائياً.</i>"
+            )
+            for target_chat_id in admin_targets:
+                try:
+                    if is_pdf:
+                        await bot.send_document(chat_id=target_chat_id, document=receipt_file_id, caption=auto_caption, parse_mode="HTML")
+                    else:
+                        await bot.send_photo(chat_id=target_chat_id, photo=receipt_file_id, caption=auto_caption, parse_mode="HTML")
+                except Exception as exc:
+                    logger.warning("تعذر تسليم إشعار الدفعة التلقائية إلى الوجهة (%s): %s", target_chat_id, exc)
+            return
+
+        elif payment_type == "cv_quota" and conf >= 0.75:
+            # اعتماد فوري لباقة السير الإضافية
+            await db.update_payment_status(
+                payment_id,
+                "approved",
+                admin_note=f"موافقة تلقائية بالذكاء الاصطناعي على باقة السير (ثقة {conf:.2f})",
+            )
+            await db.add_extra_quota(user_id, count=settings.cv_package_size)
+            try:
+                await bot.send_message(
+                    chat_id,
+                    f"🎉 <b>تم التحقق من إيصال الدفع بنجاح واعتماده تلقائياً!</b>\n\n"
+                    f"تمت إضافة <b>{settings.cv_package_size} سير ذاتية إضافية</b> إلى رصيدك بنجاح! يمكنك الآن بناء سيرتك الذاتية في أي وقت.",
+                )
+            except Exception:
+                logger.exception("فشل إرسال إشعار باقة السير للمستخدم %s", chat_id)
+
+            auto_caption = (
+                f"⚡️ <b>دفعة معتمدة تلقائياً بالـ AI #{payment_id}</b> ({file_type_badge})\n"
+                f"👤 المستخدم: <code>{user_id}</code>\n"
+                f"💼 الخدمة: <b>باقة 10 سير ذاتية إضافية</b>\n"
+                f"💵 المبلغ: {payment['amount']} {payment['currency']}\n"
+                f"🔢 رقم المعاملة بالإيصال: <code>{safe_tx_id}</code>\n"
+                f"💰 المبلغ المرصود: {safe_amt}\n"
+                f"🎯 المستفيد: {safe_recipient}\n"
+                f"🤖 تقييم الذكاء الاصطناعي: {safe_reason} (ثقة {conf:.2f})\n"
+                "🟢 <i>تمت إضافة الرصيد لحساب العميل تلقائياً.</i>"
+            )
+            for target_chat_id in admin_targets:
+                try:
+                    if is_pdf:
+                        await bot.send_document(chat_id=target_chat_id, document=receipt_file_id, caption=auto_caption, parse_mode="HTML")
+                    else:
+                        await bot.send_photo(chat_id=target_chat_id, photo=receipt_file_id, caption=auto_caption, parse_mode="HTML")
+                except Exception as exc:
+                    logger.warning("تعذر تسليم إشعار الدفعة التلقائية إلى الوجهة (%s): %s", target_chat_id, exc)
+            return
+
+    # ------------------------------------------------------------------
+    # 7. المسار اليدوي: في حال انخفاض الثقة أو الحاجة لتدقيق بشري
+    # ------------------------------------------------------------------
+    service_label = "باقة 10 سير ذاتية إضافية" if payment_type == "cv_quota" else "نسخة Word (DOCX)"
+    caption = (
+        f"🧾 <b>طلب دفع جديد #{payment_id}</b> ({file_type_badge})\n"
+        f"👤 معرّف المستخدم: <code>{user_id}</code>\n"
+        f"💼 الخدمة المطلوبة: <b>{service_label}</b>\n"
+        f"💵 المبلغ المطلوب: {payment['amount']} {payment['currency']}\n"
+        f"🔢 رقم المعاملة بالإيصال: <code>{safe_tx_id}</code>\n"
+        f"💰 المبلغ المرصود: {safe_amt}\n"
+        f"🎯 المستفيد: {safe_recipient}\n"
+        f"🤖 تقييم الفحص: {safe_reason} (ثقة {conf:.2f})"
+    )
 
     sent_to_admin = False
     for target_chat_id in admin_targets:
@@ -242,12 +365,13 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
             "⚠️ تعذر تسليم إشعار الدفعة لأي مشرف! يرجى التأكد من ضبط ADMIN_GROUP_ID أو ADMIN_USER_IDS وبدء المحادثة مع البوت."
         )
 
-    # 8. إخطار المستخدم بنجاح الفحص والتحويل للمراجعة دون تعليق
+    # 8. إخطار المستخدم بالتحويل للمراجعة اليدوية
     try:
-        await bot.send_message(
-            chat_id,
-            "🔍 تم استلام إيصالك وتدقيقه بنجاح، وتم تحويله لفريق المراجعة. سنُرسل لك ملف Word فور اعتماده!",
+        user_wait_msg = (
+            "🔍 تم استلام إيصالك وتدقيقه بنجاح، وتم تحويله لفريق المراجعة. "
+            + ("سنُرسل لك ملف Word فور اعتماده!" if payment_type == "docx" else "سنقوم بتفعيل رصيدك فور اعتماده!")
         )
+        await bot.send_message(chat_id, user_wait_msg)
     except Exception:
         logger.exception("فشل إرسال رسالة التأكيد للمستخدم %s", chat_id)
 
