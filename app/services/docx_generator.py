@@ -156,6 +156,7 @@ def generate_cv_docx(cv_data: dict[str, Any]) -> bytes:
     language = _clean_str(cv_data.get("_language")) or "ar"
     is_arabic = language == "ar"
     labels = _LABELS.get(language, _LABELS["ar"])
+    item_sep = "\u200F  •  \u200F" if is_arabic else "  •  "
 
     doc = Document()
 
@@ -202,7 +203,7 @@ def generate_cv_docx(cv_data: dict[str, Any]) -> bytes:
         ]
         valid_parts = [p for p in parts if p]
         if valid_parts:
-            contact_line = "  •  ".join(valid_parts)
+            contact_line = item_sep.join(valid_parts)
             _add_styled_paragraph(doc, contact_line, is_arabic, size_pt=10, space_after=10)
 
     # 4. النبذة المهنية
@@ -276,7 +277,7 @@ def generate_cv_docx(cv_data: dict[str, Any]) -> bytes:
         clean_skills = [_clean_str(s) for s in skills if _clean_str(s)]
         if clean_skills:
             _add_section_heading(doc, labels["skills"], is_arabic, accent_color)
-            _add_styled_paragraph(doc, "  •  ".join(clean_skills), is_arabic, size_pt=10.5, space_after=4)
+            _add_styled_paragraph(doc, item_sep.join(clean_skills), is_arabic, size_pt=10.5, space_after=4)
 
     # 8. اللغات
     languages = cv_data.get("languages")
@@ -284,7 +285,7 @@ def generate_cv_docx(cv_data: dict[str, Any]) -> bytes:
         clean_langs = [_clean_str(l) for l in languages if _clean_str(l)]
         if clean_langs:
             _add_section_heading(doc, labels["languages"], is_arabic, accent_color)
-            _add_styled_paragraph(doc, "  •  ".join(clean_langs), is_arabic, size_pt=10.5, space_after=4)
+            _add_styled_paragraph(doc, item_sep.join(clean_langs), is_arabic, size_pt=10.5, space_after=4)
 
     # ضمان وجود فقرة واحدة على الأقل لسلامة مستند Word
     if len(doc.paragraphs) == 0:

@@ -20,8 +20,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# مستخدم غير جذري (non-root) لأسباب أمنية
-RUN useradd --create-home --shell /bin/bash appuser
+# تثبيت خطوط DejaVu و Noto لضمان دعم كامل للعربية (Bold/Regular) واللاتينية والرموز في PDF
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        fonts-dejavu-core \
+        fonts-noto-core \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --shell /bin/bash appuser
 
 COPY --from=builder --chown=appuser:appuser /root/.local /home/appuser/.local
 COPY --chown=appuser:appuser app/ ./app/

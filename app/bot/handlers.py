@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import re
 from typing import Any
@@ -144,7 +145,7 @@ SUPPORT_TEXT = (
 
 
 # =====================================================================
-# دوال مساعدة لتنسيق العرض والمعاينة
+# دوال مساعدة لتنسيق العرض والمعاينة وتحليل التعديلات
 # =====================================================================
 
 def _format_cv_preview(cv_data: dict[str, Any], language: str = "ar", style: str = "enhanced") -> str:
@@ -166,9 +167,14 @@ def _format_cv_preview(cv_data: dict[str, Any], language: str = "ar", style: str
         role = html.escape(str(exp.get("role") or ""))
         comp = html.escape(str(exp.get("company") or ""))
         period = html.escape(str(exp.get("period") or ""))
-        header = f"• <b>{role}</b> في <i>{comp}</i> ({period})" if comp else f"• <b>{role}</b> ({period})"
+        if role and comp:
+            header = f"• <b>{role}</b> في <i>{comp}</i>"
+        else:
+            header = f"• <b>{role or comp}</b>"
+        if period:
+            header += f" ({period})"
         exp_lines.append(header)
-        for b in (exp.get("bullets") or [])[:2]:
+        for b in (exp.get("bullets") or [])[:3]:
             exp_lines.append(f"   - {html.escape(str(b))}")
     exp_str = "\n".join(exp_lines) if exp_lines else "لا توجد خبرات مسجلة"
 
@@ -177,7 +183,10 @@ def _format_cv_preview(cv_data: dict[str, Any], language: str = "ar", style: str
         deg = html.escape(str(edu.get("degree") or ""))
         inst = html.escape(str(edu.get("institution") or ""))
         period = html.escape(str(edu.get("period") or ""))
-        edu_lines.append(f"• <b>{deg}</b> - <i>{inst}</i> ({period})")
+        line = f"• <b>{deg}</b> - <i>{inst}</i>" if (deg and inst) else f"• <b>{deg or inst}</b>"
+        if period:
+            line += f" ({period})"
+        edu_lines.append(line)
     edu_str = "\n".join(edu_lines) if edu_lines else "لا توجد مؤهلات مسجلة"
 
     skills = cv_data.get("skills") or []
@@ -205,10 +214,75 @@ def _format_cv_preview(cv_data: dict[str, Any], language: str = "ar", style: str
         "👇 <i>اضغط على أي قسم أدناه لتعديله أو تبديل النمط، ثم اضغط على زر الاعتماد لتوليد ملف الـ PDF:</i>"
     )
 
-    # ضمان عدم تجاوز الحد الأقصى لطول رسائل تيليجرام (4096 حرف)
     if len(preview) > 3800:
         preview = preview[:3750] + "\n... [تم اختصار العرض للمعاينة]"
     return preview
+
+
+def _parse_experience_edit(raw_text: str) -> list[dict[str, Any]]:
+    """يحلل نص تعديل الخبرات بمرونة (يدعم صيغة المسمى | الشركة | الفترة والأسطر النقطية)."""
+    lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+    if not lines:
+        return []
+
+    first = lines[0].lstrip("•-* ")
+    bullets = [ln.lstrip("•-* ").strip() for ln in lines[1:] if ln.lstrip("•-* ").strip()]
+
+    if "|" in first:
+        parts = [p.strip() for p in first.split("|")]
+        role = parts[0] if len(parts) > 0 else ""
+        company = parts[1] if len(parts) > 1 else ""
+        period = parts[2] if len(parts) > 2 else ""
+    elif "—" in first or " - " in first:
+        sep = "—" if "—" in first else " - "
+        parts = [p.strip() for p in first.split(sep, 1)]
+        role = parts[0]
+        rest = parts[1] if len(parts) > 1 else ""
+        m = re.search(r"\(([^)]+)\)\s*$", rest)
+        if m:
+            period = m.group(1).strip()
+            company = rest[: m.start()].strip()
+        else:
+            company = rest
+            period = ""
+    else:
+        role = first[:100]
+        company = ""
+        period = ""
+
+    return [{"role": role, "company": company, "period": period, "bullets": bullets}]
+
+
+def _parse_education_edit(raw_text: str) -> list[dict[str, Any]]:
+    """يحلل نص تعديل المؤهلات العلمية بمرونة (يدعم الشهادة | الجامعة | الفترة أو الأسطر المتعددة)."""
+    entries: list[dict[str, Any]] = []
+    for ln in raw_text.splitlines():
+        line = ln.strip().lstrip("•-* ").strip()
+        if not line:
+            continue
+        if "|" in line:
+            parts = [p.strip() for p in line.split("|")]
+            degree = parts[0] if len(parts) > 0 else ""
+            inst = parts[1] if len(parts) > 1 else ""
+            period = parts[2] if len(parts) > 2 else ""
+        elif "—" in line or " - " in line:
+            sep = "—" if "—" in line else " - "
+            parts = [p.strip() for p in line.split(sep, 1)]
+            degree = parts[0]
+            rest = parts[1] if len(parts) > 1 else ""
+            m = re.search(r"\(([^)]+)\)\s*$", rest)
+            if m:
+                period = m.group(1).strip()
+                inst = rest[: m.start()].strip()
+            else:
+                inst = rest
+                period = ""
+        else:
+            degree = line
+            inst = ""
+            period = ""
+        entries.append({"degree": degree, "institution": inst, "period": period})
+    return entries
 
 
 # =====================================================================
@@ -301,7 +375,6 @@ async def handle_free_text_cv(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # فحص أمني لمنع هجمات حجب الخدمة واستهلاك التوكن عبر نصوص ضخمة
     if len(message.text.strip()) > 5000:
         await message.answer(
             "⚠️ النص المرسل طويل جداً (الحد الأقصى المسموح 5000 حرف).\n"
@@ -446,7 +519,6 @@ async def _run_completeness_check(
         except Exception:
             pass
 
-    # إذا كانت البيانات غير مكتملة ولم يتم فرض الاكتمال: نسأل أسئلة الاستكمال
     if result.get("status") != "complete" and not is_forced:
         question = result.get("question") or {}
         question_text = question.get("text") or result.get("follow_up_message") or (
@@ -466,7 +538,8 @@ async def _run_completeness_check(
             await message.answer(question_text, reply_markup=more_info_text_keyboard())
         return
 
-    # البيانات مكتملة أو تم طلب التخطي: الانتقال للوحة التحكم والمعاينة التفاعلية
+    result["_language"] = language
+    result["_style"] = style
     await state.update_data(cv_data=result, style=style, language=language)
     await state.set_state(CvBuildStates.preview_dashboard)
 
@@ -508,7 +581,6 @@ async def handle_busy_state(message: Message) -> None:
     ~F.text.in_(MENU_BUTTON_TEXTS),
 )
 async def handle_more_info_reply(message: Message, state: FSMContext, bot: Bot) -> None:
-    # تقييد حجم الإجابة الإضافية
     if message.text and len(message.text.strip()) > 2000:
         await message.answer("⚠️ الإجابة طويلة جداً (الحد الأقصى 2000 حرف). يرجى إرسال إجابة مختصرة ومباشرة.")
         return
@@ -578,10 +650,12 @@ async def handle_toggle_style(callback: CallbackQuery, state: FSMContext) -> Non
     current_style = data.get("style", "enhanced")
     new_style = "raw" if current_style == "enhanced" else "enhanced"
     language = data.get("language", "ar")
-    cv_data = data.get("cv_data") or {}
+    cv_data = dict(data.get("cv_data") or {})
+    cv_data["_style"] = new_style
+    cv_data["_language"] = language
 
-    await state.update_data(style=new_style)
-    label = "✨ تم تفعيل نمط التلميع بالذكاء الاصطناعي" if new_style == "enhanced" else "🖊️ تم تفعيل النمط الأصلي"
+    await state.update_data(style=new_style, cv_data=cv_data)
+    label = "✨ تم تفعيل نمط التلميع (اضغط 'إعادة صياغة ذكية' لتطبيقه على النص)" if new_style == "enhanced" else "🖊️ تم تفعيل النمط الأصلي"
     await callback.answer(label, show_alert=False)
 
     preview_text = _format_cv_preview(cv_data, language=language, style=new_style)
@@ -602,10 +676,16 @@ async def handle_toggle_language(callback: CallbackQuery, state: FSMContext) -> 
     current_lang = data.get("language", "ar")
     new_lang = "en" if current_lang == "ar" else "ar"
     style = data.get("style", "enhanced")
-    cv_data = data.get("cv_data") or {}
+    cv_data = dict(data.get("cv_data") or {})
+    cv_data["_language"] = new_lang
+    cv_data["_style"] = style
 
-    await state.update_data(language=new_lang)
-    label = "🌐 تم تحويل اللغة إلى English" if new_lang == "en" else "🌐 تم تحويل اللغة إلى العربية"
+    await state.update_data(language=new_lang, cv_data=cv_data)
+    label = (
+        "🌐 تم تحويل اللغة إلى English (اضغط 'إعادة صياغة ذكية' لترجمة المحتوى)"
+        if new_lang == "en"
+        else "🌐 تم تحويل اللغة إلى العربية (اضغط 'إعادة صياغة ذكية' لترجمة المحتوى)"
+    )
     await callback.answer(label, show_alert=False)
 
     preview_text = _format_cv_preview(cv_data, language=new_lang, style=style)
@@ -616,6 +696,43 @@ async def handle_toggle_language(callback: CallbackQuery, state: FSMContext) -> 
         )
     except TelegramBadRequest:
         pass
+
+
+@user_router.callback_query(
+    StateFilter(CvBuildStates.preview_dashboard), F.data == "cv_edit:regenerate"
+)
+async def handle_regenerate_cv_from_dashboard(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    """إعادة توليد وصياغة السيرة الذاتية عبر Gemini باللغة والأسلوب المحددين حالياً في لوحة المعاينة."""
+    await callback.answer("جارٍ إعادة الصياغة بالذكاء الاصطناعي...")
+    data = await state.get_data()
+    raw_text = data.get("raw_text", "")
+    language = data.get("language", "ar")
+    style = data.get("style", "enhanced")
+
+    if not raw_text:
+        cv_data = data.get("cv_data") or {}
+        raw_text = json.dumps(cv_data, ensure_ascii=False) if cv_data else ""
+
+    if not raw_text:
+        await callback.message.answer("⚠️ لا توجد بيانات كافية لإعادة الصياغة، يرجى البدء من جديد.")
+        return
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await state.set_state(CvBuildStates.processing)
+    await _run_completeness_check(
+        callback.message,
+        state,
+        raw_text=raw_text,
+        language=language,
+        style=style,
+        attempts=MAX_INFO_ROUNDS,
+        bot=bot,
+        force_complete=True,
+    )
 
 
 @user_router.callback_query(
@@ -631,17 +748,24 @@ async def handle_start_edit_section(callback: CallbackQuery, state: FSMContext) 
             "أرسل اسمك ورقم هاتفك والبريد الإلكتروني والمدينة في رسالة واحدة.\n"
             "<i>مثال: أحمد المحمود | +963912345678 | ahmed@mail.com | دمشق</i>"
         ),
+        "title": (
+            "💼 <b>تعديل المسمى الوظيفي (Job Title):</b>\n\n"
+            "أرسل المسمى الوظيفي الجديد الذي ترغب بظهوره تحت اسمك مباشرة:\n"
+            "<i>مثال: مهندس برمجيات أول | Senior Backend Developer</i>"
+        ),
         "summary": (
             "📝 <b>تعديل النبذة الشخصية (Summary):</b>\n\n"
             "أرسل النص الجديد للنبذة المهنية التي ترغب بظهورها في أعلى سيرتك الذاتية:"
         ),
         "experience": (
             "🏢 <b>تعديل الخبرات العملية:</b>\n\n"
-            "أرسل خبراتك المحدثة (المسمى الوظيفي، الشركة، الفترة، وأهم المهام والإنجازات):"
+            "أرسل المسمى الوظيفي والشركة والفترة في السطر الأول، ثم المهام في الأسطر التالية:\n"
+            "<i>مثال:\nمحاسب أول | شركة الشام | 2021 - 2024\n- إعداد القوائم المالية والتقارير الضريبية\n- إدارة فريق المحاسبة</i>"
         ),
         "education": (
             "🎓 <b>تعديل التعليم والمؤهلات:</b>\n\n"
-            "أرسل مؤهلاتك العلمية (الشهادة، التخصص، الجامعة أو المعهد، سنة التخرج):"
+            "أرسل مؤهلاتك العلمية بالصيغة (الشهادة | الجامعة أو المعهد | الفترة):\n"
+            "<i>مثال: إجازة في الهندسة المعلوماتية | جامعة حلب | 2019 - 2024</i>"
         ),
         "skills": (
             "🛠 <b>تعديل المهارات:</b>\n\n"
@@ -688,8 +812,8 @@ async def handle_cancel_editing_section(callback: CallbackQuery, state: FSMConte
 )
 async def handle_save_edited_section(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
-    section = data.get("editing_section_name")
-    cv_data = data.get("cv_data") or {}
+    section = data.get("editing_section_name") or data.get("editing_section")
+    cv_data = dict(data.get("cv_data") or {})
     style = data.get("style", "enhanced")
     language = data.get("language", "ar")
     new_text = message.text.strip()
@@ -725,17 +849,13 @@ async def handle_save_edited_section(message: Message, state: FSMContext) -> Non
             else:
                 cv_data["full_name"] = new_text
     elif section == "experience":
-        # تحديث الخبرات بنص منظم
-        cv_data["experience"] = [
-            {"role": "الخبرة المحدثة", "company": "", "period": "", "bullets": [new_text]}
-        ]
+        cv_data["experience"] = _parse_experience_edit(new_text)
     elif section == "education":
-        cv_data["education"] = [
-            {"degree": new_text, "institution": "", "period": ""}
-        ]
+        cv_data["education"] = _parse_education_edit(new_text)
 
-    # حفظ وتطهير البيانات المحدثة
     sanitized_cv = gemini_service._sanitize_cv_result(cv_data)
+    sanitized_cv["_language"] = language
+    sanitized_cv["_style"] = style
     await state.update_data(cv_data=sanitized_cv)
     await state.set_state(CvBuildStates.preview_dashboard)
 
@@ -760,6 +880,10 @@ async def handle_confirm_cv_generation(callback: CallbackQuery, state: FSMContex
         await state.clear()
         await callback.message.answer("⚠️ حدث خطأ أو انتهت صلاحية الجلسة، يرجى البدء من جديد.")
         return
+
+    cv_data = dict(cv_data)
+    cv_data["_language"] = data.get("language") or cv_data.get("_language") or "ar"
+    cv_data["_style"] = data.get("style") or cv_data.get("_style") or "enhanced"
 
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
@@ -850,7 +974,6 @@ async def handle_receipt_photo(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # 1. منع إغراق المدفوعات: التحقق من عدم وجود دفعة سابقة معلقة قيد المراجعة
     try:
         if await db.has_pending_payment(message.from_user.id):
             await message.answer(
@@ -863,7 +986,6 @@ async def handle_receipt_photo(message: Message, state: FSMContext) -> None:
 
     receipt_file_id = message.photo[-1].file_id
 
-    # 2. الحماية من إعادة استخدام نفس الإيصال (Anti-Replay Attack)
     try:
         if await db.is_receipt_reused(receipt_file_id):
             await message.answer(

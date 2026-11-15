@@ -1,7 +1,8 @@
 """
-خدمة التكامل مع Google Gemini API
+خدمة التكامل مع Google Gemini API (محدثة لأحدث نماذج السلسلة 3.8 / 3.6)
 - استخراج وهيكلة بيانات السيرة الذاتية من نصوص حرة (Structured JSON Output)
 - التحقق الذكي من إيصالات الدفع المالي (Sham Cash receipts) عبر Gemini Multimodal Vision
+- دعم كامل لمعاملات نماذج Gemini 3.8 Flash و 3.6 Flash و 3.5 Flash-Lite (thinkingLevel="low"، تصفية أجزاء التفكير thought parts، وإزالة معاملات temperature المتقادمة)
 - إدارة متينة للشبكة والتراجع الأسي (Exponential Backoff with Jitter) عند 429 وأخطاء الخادم 5xx
 """
 from __future__ import annotations
@@ -22,9 +23,67 @@ logger = logging.getLogger(__name__)
 
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
-DEFAULT_TEXT_MODEL = "gemini-2.5-flash"
-DEFAULT_VISION_MODEL = "gemini-2.5-flash"
-FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.5-pro", "gemini-3-flash-preview"]
+# أحدث نماذج Gemini الرسمية المستقرة (نوفمبر 2026) مع سلسلة بدائل متدرجة
+DEFAULT_TEXT_MODEL = "gemini-3.8-flash"
+DEFAULT_VISION_MODEL = "gemini-3.8-flash"
+FALLBACK_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash",
+]
+
+
+def _supports_modern_thinking_config(model_name: str) -> bool:
+    """
+    يتحقق مما إذا كان النموذج من الجيل الحديث (Gemini 3.x / 4.x) الذي يعتمد
+    thinkingConfig.thinkingLevel ويتجاهل/يرفض معاملات المعاينة التقليدية (temperature/top_p/top_k).
+    """
+    m = (model_name or "").strip().lower()
+    return m.startswith(("gemini-3", "gemini-4"))
+
+
+def _build_generation_config(
+    model_name: str,
+    schema: dict[str, Any],
+    max_output_tokens: int,
+    legacy_temperature: float = 0.2,
+) -> dict[str, Any]:
+    """
+    يبني كائن generationConfig متوافقاً مع جيل النموذج المستهدف:
+    - لنماذج Gemini 3.x / 4.x: يضبط thinkingLevel="low" لتقليل زمن الاستجابة ومنع استنزاف
+      ميزانية التوكنز في التفكير الداخلي، مع حذف temperature المتقادم وفق دليل الترقية الرسمي.
+    - للنماذج الأقدم (مثل gemini-2.5-flash): يمرر temperature التقليدي للتوافق العكسي.
+    """
+    config: dict[str, Any] = {
+        "responseMimeType": "application/json",
+        "responseSchema": schema,
+        "maxOutputTokens": max_output_tokens,
+    }
+    if _supports_modern_thinking_config(model_name):
+        config["thinkingConfig"] = {"thinkingLevel": "low"}
+    else:
+        config["temperature"] = legacy_temperature
+    return config
+
+
+def _extract_candidate_text(candidate: dict[str, Any]) -> str:
+    """
+    يستخرج النص الفعلي (JSON) من parts المرشح مع استبعاد أجزاء التفكير الداخلي (thought=True)
+    التي ترجعها نماذج Gemini 3.x / 4.x عند تفعيل التفكير.
+    """
+    parts = candidate.get("content", {}).get("parts", [])
+    if not isinstance(parts, list) or not parts:
+        return ""
+    non_thought_texts = [
+        p.get("text", "")
+        for p in parts
+        if isinstance(p, dict) and not p.get("thought") and isinstance(p.get("text"), str)
+    ]
+    if non_thought_texts:
+        return "".join(non_thought_texts).strip()
+    return "".join(p.get("text", "") for p in parts if isinstance(p, dict) and isinstance(p.get("text"), str)).strip()
+
 
 _CV_CHECK_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -444,7 +503,7 @@ def _sanitize_cv_result(result: dict[str, Any]) -> dict[str, Any]:
         items = result.get(key)
         if isinstance(items, list):
             result[key] = [
-                c for c in (_clean_text_field(x, max_len=max_l) for x in items if isinstance(x, str)) if c
+                c for c in (_clean_text_field(x, max_len=max_l, field_type=key) for x in items if isinstance(x, str)) if c
             ]
 
     return result
@@ -556,46 +615,46 @@ async def _call_gemini_with_retry(
 
     client = get_http_client()
     for attempt in range(1, max_retries + 1):
-            try:
-                resp = await client.post(url, json=body, headers=headers)
+        try:
+            resp = await client.post(url, json=body, headers=headers)
 
-                if resp.status_code == 429:
-                    retry_after = resp.headers.get("Retry-After")
-                    sleep_time = float(retry_after) if retry_after and retry_after.isdigit() else base_delay
-                    sleep_time += random.uniform(0.2, 0.8)
-                    logger.warning("Gemini 429 (Rate Limit) - انتظار %.2f ثانية (محاولة %s/%s)", sleep_time, attempt, max_retries)
-                    await asyncio.sleep(sleep_time)
-                    base_delay *= 2
-                    continue
-
-                if resp.status_code in (500, 502, 503, 504):
-                    sleep_time = base_delay + random.uniform(0.3, 1.0)
-                    logger.warning(
-                        "خطأ خادم مؤقت من Gemini (%s) - إعادة المحاولة بعد %.2f ثانية (محاولة %s/%s)",
-                        resp.status_code, sleep_time, attempt, max_retries,
-                    )
-                    await asyncio.sleep(sleep_time)
-                    base_delay *= 2
-                    continue
-
-                if 400 <= resp.status_code < 500:
-                    logger.error("خطأ غير قابل للإعادة من Gemini (%s): %s", resp.status_code, resp.text[:300])
-                    resp.raise_for_status()
-
-                resp.raise_for_status()
-                return resp.json()
-
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                last_error = exc
-                sleep_time = base_delay + random.uniform(0.2, 0.6)
-                logger.warning("عطل شبكة أثناء الاتصال بـ Gemini: %s (محاولة %s/%s)", exc, attempt, max_retries)
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                sleep_time = float(retry_after) if retry_after and retry_after.isdigit() else base_delay
+                sleep_time += random.uniform(0.2, 0.8)
+                logger.warning("Gemini 429 (Rate Limit) - انتظار %.2f ثانية (محاولة %s/%s)", sleep_time, attempt, max_retries)
                 await asyncio.sleep(sleep_time)
                 base_delay *= 2
+                continue
 
-            except httpx.HTTPStatusError as exc:
-                last_error = exc
-                logger.error("فشل استدعاء Gemini HTTP (%s)", exc.response.status_code)
-                break
+            if resp.status_code in (500, 502, 503, 504):
+                sleep_time = base_delay + random.uniform(0.3, 1.0)
+                logger.warning(
+                    "خطأ خادم مؤقت من Gemini (%s) - إعادة المحاولة بعد %.2f ثانية (محاولة %s/%s)",
+                    resp.status_code, sleep_time, attempt, max_retries,
+                )
+                await asyncio.sleep(sleep_time)
+                base_delay *= 2
+                continue
+
+            if 400 <= resp.status_code < 500:
+                logger.error("خطأ غير قابل للإعادة من Gemini (%s): %s", resp.status_code, resp.text[:300])
+                resp.raise_for_status()
+
+            resp.raise_for_status()
+            return resp.json()
+
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            last_error = exc
+            sleep_time = base_delay + random.uniform(0.2, 0.6)
+            logger.warning("عطل شبكة أثناء الاتصال بـ Gemini: %s (محاولة %s/%s)", exc, attempt, max_retries)
+            await asyncio.sleep(sleep_time)
+            base_delay *= 2
+
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            logger.error("فشل استدعاء Gemini HTTP (%s)", exc.response.status_code)
+            break
 
     raise RuntimeError(f"فشل الاتصال بـ Gemini بعد {max_retries} محاولات: {last_error}")
 
@@ -623,69 +682,70 @@ async def check_and_extract_cv(
 
     system_prompt = _build_system_prompt(language, style, force_complete)
 
-    token_budgets = [4096, 8192]
+    # ميزانية توكنز كافية لنماذج السلسلة 3.x التي تحسب توكنز التفكير ضمن maxOutputTokens
+    token_budgets = [16384, 32768]
     max_content_retries = 2
 
     for content_attempt in range(1, max_content_retries + 1):
         last_finish_reason: str | None = None
+        last_err: Exception | None = None
         result: dict[str, Any] | None = None
 
         for attempt, max_tokens in enumerate(token_budgets, start=1):
-            generation_config: dict[str, Any] = {
-                "responseMimeType": "application/json",
-                "responseSchema": _CV_CHECK_SCHEMA,
-                "maxOutputTokens": max_tokens,
-                "temperature": 0.2,
-            }
-
-            body = {
-                "systemInstruction": {"parts": [{"text": system_prompt}]},
-                "contents": [{"role": "user", "parts": [{"text": bounded_user_input}]}],
-                "generationConfig": generation_config,
-            }
-
-            data = None
-            last_err = None
             for m_name in candidate_models:
+                generation_config = _build_generation_config(
+                    model_name=m_name,
+                    schema=_CV_CHECK_SCHEMA,
+                    max_output_tokens=max_tokens,
+                    legacy_temperature=0.2,
+                )
+                body = {
+                    "systemInstruction": {"parts": [{"text": system_prompt}]},
+                    "contents": [{"role": "user", "parts": [{"text": bounded_user_input}]}],
+                    "generationConfig": generation_config,
+                }
                 url = f"{_GEMINI_BASE}/{m_name}:generateContent"
+
                 try:
                     data = await _call_gemini_with_retry(url, body)
-                    break
                 except Exception as e:
                     last_err = e
                     logger.warning("النموذج %s لم ينجح في تحليل CV (%s)، جاري تجربة النموذج التالي...", m_name, e)
                     continue
 
-            if data is None:
-                raise RuntimeError(f"تعذر استدعاء أي من نماذج Gemini المتاحة: {last_err}")
+                candidate = data.get("candidates", [{}])[0]
+                finish_reason = candidate.get("finishReason")
+                last_finish_reason = finish_reason
 
-            candidate = data.get("candidates", [{}])[0]
-            finish_reason = candidate.get("finishReason")
-            last_finish_reason = finish_reason
+                if finish_reason and finish_reason not in ("STOP",):
+                    logger.warning(
+                        "توقف غير مكتمل من النموذج %s (finishReason=%s, محاولة %s/%s)",
+                        m_name, finish_reason, attempt, len(token_budgets),
+                    )
+                    continue
 
-            if finish_reason and finish_reason not in ("STOP",):
-                logger.warning(
-                    "توقف غير مكتمل من Gemini (finishReason=%s, محاولة %s/%s)",
-                    finish_reason, attempt, len(token_budgets)
-                )
-                continue
+                text_part = _extract_candidate_text(candidate)
+                if not text_part:
+                    logger.warning("استجابة نصية فارغة من النموذج %s، تجربة البديل...", m_name)
+                    continue
 
-            parts = candidate.get("content", {}).get("parts", [])
-            text_part = "".join(p.get("text", "") for p in parts)
-            if not text_part.strip():
-                continue
+                try:
+                    result = _extract_json_from_response(text_part)
+                    break
+                except Exception as err:
+                    last_err = err
+                    logger.warning("فشل فك شفرة JSON من استجابة النموذج %s: %s", m_name, err)
+                    continue
 
-            try:
-                result = _extract_json_from_response(text_part)
+            if result is not None:
                 break
-            except Exception as err:
-                logger.warning("فشل فك شفرة JSON من استجابة Gemini: %s", err)
-                continue
 
         if result is None:
             if content_attempt < max_content_retries:
                 logger.warning("إعادة محاولة استخراج محتوى السيرة الذاتية (المحاولة %s)", content_attempt)
                 continue
+            if last_err is not None and last_finish_reason is None:
+                raise RuntimeError(f"تعذر استدعاء أي من نماذج Gemini المتاحة: {last_err}")
             raise RuntimeError(f"استجابة Gemini غير مكتملة (finishReason={last_finish_reason})")
 
         if force_complete:
@@ -762,60 +822,60 @@ async def verify_payment_receipt(image_bytes: bytes, mime_type: str = "image/jpe
         "5. أرجع النتيجة حصراً بصيغة JSON وفق المخطط المحدد."
     )
 
-    body = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {"text": prompt},
-                    {
-                        "inlineData": {
-                            "mimeType": mime_type,
-                            "data": base64.b64encode(image_bytes).decode("utf-8"),
-                        }
-                    },
-                ],
-            }
-        ],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": _RECEIPT_SCHEMA,
-            "maxOutputTokens": 2048,
-            "temperature": 0.1,
-        },
-    }
+    encoded_img = base64.b64encode(image_bytes).decode("utf-8")
+    last_err: Exception | None = None
 
-    data = None
-    last_err = None
     for m_name in candidate_models:
+        generation_config = _build_generation_config(
+            model_name=m_name,
+            schema=_RECEIPT_SCHEMA,
+            max_output_tokens=4096,
+            legacy_temperature=0.1,
+        )
+        body = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "inlineData": {
+                                "mimeType": mime_type,
+                                "data": encoded_img,
+                            }
+                        },
+                    ],
+                }
+            ],
+            "generationConfig": generation_config,
+        }
         url = f"{_GEMINI_BASE}/{m_name}:generateContent"
+
         try:
             data = await _call_gemini_with_retry(url, body)
-            break
         except Exception as e:
             last_err = e
             logger.warning("نموذج الرؤية %s لم ينجح في فحص الإيصال (%s)، تجربة التالي...", m_name, e)
             continue
 
-    if data is None:
-        logger.error("تعذر فحص الإيصال عبر أي نموذج متاح: %s", last_err)
-        return {"is_receipt": True, "confidence": 0.0, "reason": "تعذّر الفحص الآلي، إحالة للمراجعة اليدوية"}
+        candidates = data.get("candidates", [])
+        if not candidates:
+            logger.warning("لم يرجع النموذج %s أي مرشحات في فحص الإيصال", m_name)
+            continue
 
-    candidates = data.get("candidates", [])
-    if not candidates:
-        logger.error("لم يرجع Gemini أي مرشحات في فحص الإيصال")
-        return {"is_receipt": False, "confidence": 0.0, "reason": "لم تتوفر استجابة من نموذج التحليل"}
+        candidate = candidates[0]
+        text_part = _extract_candidate_text(candidate)
+        if not text_part:
+            finish_reason = candidate.get("finishReason")
+            logger.warning("استجابة فحص الإيصال فارغة من النموذج %s (finishReason=%s)", m_name, finish_reason)
+            continue
 
-    candidate = candidates[0]
-    parts = candidate.get("content", {}).get("parts", [])
-    if not parts or "text" not in parts[0]:
-        finish_reason = candidate.get("finishReason")
-        logger.error("استجابة فحص الإيصال فارغة (finishReason=%s)", finish_reason)
-        return {"is_receipt": False, "confidence": 0.0, "reason": f"انتهت الاستجابة بسبب {finish_reason}"}
+        try:
+            return _extract_json_from_response(text_part)
+        except Exception as exc:
+            last_err = exc
+            logger.warning("فشل قراءة JSON من استجابة فحص الإيصال عبر %s: %s", m_name, exc)
+            continue
 
-    text_part = parts[0]["text"]
-    try:
-        return _extract_json_from_response(text_part)
-    except Exception as exc:
-        logger.error("فشل قراءة JSON من استجابة فحص الإيصال: %s - النص: %r", exc, text_part[:150])
-        return {"is_receipt": False, "confidence": 0.0, "reason": "تعذر تحليل الرد كـ JSON صالح"}
+    logger.error("تعذر فحص الإيصال عبر أي نموذج متاح: %s", last_err)
+    return {"is_receipt": True, "confidence": 0.0, "reason": "تعذّر الفحص الآلي، إحالة للمراجعة اليدوية"}

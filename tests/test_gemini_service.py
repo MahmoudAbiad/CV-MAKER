@@ -9,28 +9,70 @@ import httpx
 import pytest
 
 from app.services.gemini_service import (
+    DEFAULT_TEXT_MODEL,
+    DEFAULT_VISION_MODEL,
+    FALLBACK_MODELS,
+    _CV_CHECK_SCHEMA,
+    _build_generation_config,
     _build_system_prompt,
     _call_gemini_with_retry,
     _clean_body_field,
     _clean_email_field,
     _clean_text_field,
+    _extract_candidate_text,
     _extract_json_from_response,
     _has_minimum_cv_content,
     _looks_degenerate,
     _sanitize_cv_result,
-    _sanitize_dialogue_result,
+    _supports_modern_thinking_config,
 )
+
+
+def test_latest_gemini_models_configured():
+    """التحقق من ضبط أحدث نماذج Gemini 3.8 و 3.6 و 3.5 Flash-Lite وإعدادات التفكير"""
+    assert DEFAULT_TEXT_MODEL == "gemini-3.8-flash"
+    assert DEFAULT_VISION_MODEL == "gemini-3.8-flash"
+    assert "gemini-3.8-flash" in FALLBACK_MODELS
+    assert "gemini-3.6-flash" in FALLBACK_MODELS
+    assert "gemini-3.5-flash-lite" in FALLBACK_MODELS
+
+    assert _supports_modern_thinking_config("gemini-3.8-flash") is True
+    assert _supports_modern_thinking_config("gemini-3.6-flash") is True
+    assert _supports_modern_thinking_config("gemini-2.5-flash") is False
+
+    cfg_modern = _build_generation_config("gemini-3.8-flash", _CV_CHECK_SCHEMA, 16384)
+    assert "temperature" not in cfg_modern
+    assert cfg_modern.get("thinkingConfig") == {"thinkingLevel": "low"}
+
+    cfg_legacy = _build_generation_config("gemini-2.5-flash", _CV_CHECK_SCHEMA, 16384, legacy_temperature=0.2)
+    assert cfg_legacy.get("temperature") == 0.2
+    assert "thinkingConfig" not in cfg_legacy
+
+
+def test_extract_candidate_text_filters_thought_parts():
+    """التحقق من استبعاد أجزاء التفكير الداخلي (thought=True) عند قراءة استجابة Gemini 3.x"""
+    candidate = {
+        "content": {
+            "parts": [
+                {"thought": True, "text": "Internal thought with {fake: json} object"},
+                {"text": '{"status": "complete", "full_name": "أحمد العلي"}'},
+            ]
+        }
+    }
+    extracted = _extract_candidate_text(candidate)
+    assert extracted == '{"status": "complete", "full_name": "أحمد العلي"}'
+    parsed = _extract_json_from_response(extracted)
+    assert parsed["status"] == "complete"
+    assert parsed["full_name"] == "أحمد العلي"
 
 
 def test_looks_degenerate():
     """التحقق من كاشف التكرار والانحلال في نصوص النماذج"""
-    # نصوص طبيعية سليمة
     assert not _looks_degenerate("مهندس برمجيات خبرة 5 سنوات في بايثون وداتابيز")
     assert not _looks_degenerate("0991234567")
     assert not _looks_degenerate("-----------------")
     assert not _looks_degenerate("")
 
-    # نصوص تكرارية متحللة
     assert _looks_degenerate("مهندس مهندس مهندس مهندس مهندس")
     assert _looks_degenerate("خبرة عمل خبرة عمل خبرة عمل خبرة عمل")
     assert _looks_degenerate("aaaaaaaaaaaaaaaaaaaa")
@@ -39,14 +81,12 @@ def test_looks_degenerate():
 def test_clean_text_field():
     """التحقق من تنظيف الحقول النصية القصيرة"""
     assert _clean_text_field("  أحمد محمود  \nسطر ثاني  ") == "أحمد محمود"
-    
-    # التحقق من القص عند تجاوز الحد الأقصى دون أن يكون النص تكرارياً متحللاً
+
     long_desc = "مهندس حواسيب وبرمجيات متخصص في بناء وتطوير المنظومات السحابية الحديثة والموزعة"
     assert len(_clean_text_field(long_desc, max_len=30)) <= 30
     assert _clean_text_field(None) == ""
     assert _clean_text_field(12345) == "12345"
 
-    # التحقق من عدم مسح المهارات التي تحتوي على فواصل منقوطة
     assert _clean_text_field("Python; FastAPI; Docker", field_type="skill") == "Python; FastAPI; Docker"
 
 
@@ -70,19 +110,15 @@ def test_clean_body_field():
 
 def test_extract_json_from_response():
     """التحقق من استخراج كائنات JSON الصالحة من ردود Gemini النصية والـ Markdown"""
-    # 1. JSON صافٍ مباشر
     raw_json = '{"status": "complete", "full_name": "أحمد"}'
     assert _extract_json_from_response(raw_json) == {"status": "complete", "full_name": "أحمد"}
 
-    # 2. JSON داخل كود ماركداون ```json ... ```
     md_json = "```json\n{\"status\": \"needs_more_info\", \"question\": {\"text\": \"سؤال\"}}\n```"
     assert _extract_json_from_response(md_json)["status"] == "needs_more_info"
 
-    # 3. JSON محاط بنصوص شرح قبل وبعد
     embedded = "Here is the extracted resume data:\n{\"status\": \"complete\", \"skills\": [\"Python\"]}\nHope this helps!"
     assert _extract_json_from_response(embedded)["status"] == "complete"
 
-    # 4. نص فارغ أو غير صالح
     with pytest.raises(ValueError):
         _extract_json_from_response("")
 
@@ -92,13 +128,9 @@ def test_extract_json_from_response():
 
 def test_has_minimum_cv_content():
     """التحقق من فحص الحد الأدنى لمحتوى السيرة الذاتية"""
-    # غير مكتملة (لا اسم)
     assert not _has_minimum_cv_content({"full_name": "", "skills": ["Python"]})
-
-    # غير مكتملة (اسم فقط دون أي بيانات إضافية)
     assert not _has_minimum_cv_content({"full_name": "سامر"})
 
-    # مكتملة بالحد الأدنى
     assert _has_minimum_cv_content({"full_name": "سامر", "skills": ["Python"]})
     assert _has_minimum_cv_content({"full_name": "سامر", "summary": "نبذة مهنية"})
     assert _has_minimum_cv_content({"full_name": "سامر", "education": [{"degree": "بكالوريوس"}]})
@@ -113,7 +145,6 @@ def test_build_system_prompt():
     prompt_en = _build_system_prompt("en", "raw", force_complete=False)
     assert "Executive Resume Strategist" in prompt_en
 
-    # التحقق من وجود توجيه الإلزام عند تفعيل force_complete
     prompt_forced = _build_system_prompt("ar", "enhanced", force_complete=True)
     assert "توجيه استثنائي" in prompt_forced
 

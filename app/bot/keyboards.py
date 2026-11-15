@@ -108,7 +108,7 @@ def more_info_text_keyboard() -> InlineKeyboardMarkup:
 def cv_preview_dashboard_keyboard(style: str = "enhanced", lang: str = "ar") -> InlineKeyboardMarkup:
     """
     لوحة تحكم تفاعلية متطورة للمستخدم:
-    تمكنه من مراجعة كل قسم وتعديله على حدة، وتغيير اللغة أو الأسلوب بضغطة زر
+    تمكنه من مراجعة كل قسم وتعديله على حدة، وتغيير اللغة أو الأسلوب وإعادة الصياغة بضغطة زر
     قبل الاعتماد والتوليد النهائي لملف PDF.
     """
     style_label = "✨ النمط: ملمّع (AI)" if style == "enhanced" else "🖊️ النمط: أصلي"
@@ -118,15 +118,19 @@ def cv_preview_dashboard_keyboard(style: str = "enhanced", lang: str = "ar") -> 
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="👤 الاسم والاتصال", callback_data="cv_edit:contact"),
+                InlineKeyboardButton(text="💼 المسمى الوظيفي", callback_data="cv_edit:title"),
+            ],
+            [
                 InlineKeyboardButton(text="📝 النبذة الشخصية", callback_data="cv_edit:summary"),
-            ],
-            [
                 InlineKeyboardButton(text="🏢 الخبرات العملية", callback_data="cv_edit:experience"),
-                InlineKeyboardButton(text="🎓 المؤهلات والتعليم", callback_data="cv_edit:education"),
             ],
             [
+                InlineKeyboardButton(text="🎓 المؤهلات والتعليم", callback_data="cv_edit:education"),
                 InlineKeyboardButton(text="🛠 المهارات", callback_data="cv_edit:skills"),
+            ],
+            [
                 InlineKeyboardButton(text="🌐 اللغات", callback_data="cv_edit:languages"),
+                InlineKeyboardButton(text="🔄 إعادة صياغة ذكية", callback_data="cv_edit:regenerate"),
             ],
             [
                 InlineKeyboardButton(text=style_label, callback_data="cv_edit:toggle_style"),

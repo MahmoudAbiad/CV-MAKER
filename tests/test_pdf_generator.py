@@ -7,8 +7,11 @@ from typing import Any
 import pytest
 
 from app.services.pdf_generator import (
+    _format_paragraph_text,
+    _get_font_suite,
     _get_registered_font,
     _reshape_text,
+    _tag_dual_fonts,
     generate_cv_pdf,
 )
 
@@ -73,17 +76,42 @@ def test_reshape_text_arabic_and_bidi():
     reshaped = _reshape_text(text_ar, is_arabic=True)
     assert isinstance(reshaped, str)
     assert len(reshaped) > 0
-    # النص المعاد تشكيله يختلف عن النص الأصلي بسبب ربط الحروف
     assert reshaped != text_ar
 
-    # فحص النص غير العربي
     text_en = "Software Engineer"
     not_reshaped = _reshape_text(text_en, is_arabic=False)
     assert not_reshaped == text_en
 
-    # فحص القيمة الفارغة
     assert _reshape_text("", is_arabic=True) == ""
     assert _reshape_text(None, is_arabic=True) == ""
+
+
+def test_multiline_arabic_logical_line_order():
+    """التحقق من عدم انعكاس ترتيب الأسطر في الفقرات العربية الطويلة (السطر الأول يبقى أولاً)"""
+    ar_reg, _, lat_reg, _ = _get_font_suite()
+    long_summary = (
+        "البداية الأولى للفقرة المهنية في السطر الأول مع تفاصيل موسعة جداً حول هندسة البرمجيات الحديثة "
+        "والنهاية الختامية للفقرة في السطر الأخير."
+    )
+    formatted = _format_paragraph_text(long_summary, True, 10.0, 220.0, ar_reg, lat_reg)
+    lines = formatted.split("<br/>")
+    assert len(lines) >= 2
+    first_word_shaped = _reshape_text("البداية", is_arabic=True)
+    last_word_shaped = _reshape_text("الأخير", is_arabic=True)
+    assert first_word_shaped in lines[0]
+    assert last_word_shaped in lines[-1]
+
+
+def test_dual_font_tagging_prevents_tofu():
+    """التحقق من فصل الحروف العربية عن الإنجليزية والرموز لمنع المربعات الفارغة (Tofu)"""
+    ar_reg, _, lat_reg, _ = _get_font_suite()
+    visual = _reshape_text("مطور Python في دمشق (ahmad@example.com)", is_arabic=True)
+    tagged = _tag_dual_fonts(visual, ar_reg, lat_reg)
+    assert "Python" in tagged
+    assert "ahmad@example.com" in tagged
+    if ar_reg != lat_reg:
+        assert f'<font name="{lat_reg}">' in tagged
+        assert f'<font name="{ar_reg}">' in tagged
 
 
 def test_registered_font_resolution():
