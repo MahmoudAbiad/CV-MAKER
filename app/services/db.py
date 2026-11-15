@@ -222,6 +222,29 @@ class Database:
             "created_at": row[4],
         }
 
+    async def get_latest_cv_record(self, user_id: int) -> Optional[dict[str, Any]]:
+        """استرجاع أحدث سيرة ذاتية للمستخدم لربط الدفعات ونسخ Word تلقائياً."""
+        rs = await self.client.execute(
+            "SELECT id, user_id, parsed_json, format, created_at FROM cv_records WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            [user_id],
+        )
+        if not rs.rows:
+            return None
+        row = rs.rows[0]
+        try:
+            parsed = json.loads(row[2])
+        except (TypeError, json.JSONDecodeError):
+            logger.error("تعذر فك ترميز JSON للسيرة الذاتية رقم %s للمستخدم %s", row[0], user_id)
+            parsed = {}
+
+        return {
+            "id": row[0],
+            "user_id": row[1],
+            "parsed_json": parsed,
+            "format": row[3],
+            "created_at": row[4],
+        }
+
     # ------------------------------------------------------------------
     # المدفوعات
     # ------------------------------------------------------------------
@@ -326,11 +349,24 @@ class Database:
 
     async def has_pending_payment(self, user_id: int) -> bool:
         """التحقق مما إذا كان لدى المستخدم طلب دفع معلق قيد المراجعة لمنع الإغراق."""
+        # نعتبر الطلبات المعلقة لأكثر من ساعتين منتهية الصلاحية لتفادي قفل حساب المستخدم في حال غياب المشرف
         rs = await self.client.execute(
-            "SELECT 1 FROM payments WHERE user_id = ? AND status = 'pending' LIMIT 1",
+            """
+            SELECT id FROM payments 
+            WHERE user_id = ? AND status = 'pending' 
+              AND datetime(created_at) > datetime('now', '-2 hours')
+            LIMIT 1
+            """,
             [user_id],
         )
         return len(rs.rows) > 0
+
+    async def cancel_user_pending_payments(self, user_id: int) -> None:
+        """إلغاء أي دفعات معلقة للمستخدم عند طلب الإلغاء لتمكينه من إعادة المحاولة فوراً."""
+        await self.client.execute(
+            "UPDATE payments SET status = 'cancelled', updated_at = ? WHERE user_id = ? AND status = 'pending'",
+            [_now(), user_id],
+        )
 
     async def is_receipt_reused(self, receipt_file_id: str, exclude_payment_id: int | None = None) -> bool:
         """

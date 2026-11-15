@@ -312,3 +312,66 @@ async def test_cv_generation_blocks_when_quota_exhausted(
     mock_bot.send_message.assert_called()
     sent_text = mock_bot.send_message.call_args[0][1]
     assert "استنفدت رصيدك" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_process_receipt_screening_docx_auto_approval_resilience(
+    mock_bot: AsyncMock, monkeypatch: pytest.MonkeyPatch
+):
+    """التحقق من الاعتماد التلقائي لنسخة Word ومرونة استرجاع آخر سيرة ذاتية والتعامل مع أخطاء إرسال الصور"""
+    payment_id = 99
+    user_id = 112233
+    payload = {
+        "payment_id": payment_id,
+        "chat_id": user_id,
+        "user_id": user_id,
+        "receipt_file_id": "receipt_doc_file_id",
+        "is_pdf": False,
+    }
+
+    dummy_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 30
+    mock_file = MagicMock()
+    mock_file.file_size = 500
+    mock_file.file_path = "photos/receipt.jpg"
+    mock_bot.get_file = AsyncMock(return_value=mock_file)
+    mock_bot.download_file = AsyncMock(return_value=io.BytesIO(dummy_jpeg))
+
+    # محاكاة إخفاق send_photo (كأن التيليجرام يعتبره مستنداً وليس صورة) ثم نجاح send_document
+    mock_bot.send_photo = AsyncMock(side_effect=Exception("Bad Request: file is not a photo"))
+    mock_bot.send_document = AsyncMock()
+
+    mock_verdict = {
+        "is_receipt": True,
+        "is_ai_generated": False,
+        "confidence": 0.55,  # نسبة معتدلة تكفي لنسخة Word
+        "transaction_id": "TX556677",
+        "amount": "25",
+        "recipient": "999",
+        "reason": "إيصال سليم وحقيقي",
+    }
+    monkeypatch.setattr("app.services.gemini_service.verify_payment_receipt", AsyncMock(return_value=mock_verdict))
+
+    # دفعة بدون cv_record_id مرتبط
+    mock_payment = {"amount": 0.20, "currency": "USD", "user_id": user_id, "cv_record_id": None, "payment_type": "docx"}
+    monkeypatch.setattr(db, "get_payment", AsyncMock(return_value=mock_payment))
+    monkeypatch.setattr(db, "get_latest_cv_record", AsyncMock(return_value={"id": 777, "parsed_json": {"full_name": "Test"}}))
+    monkeypatch.setattr(db, "is_receipt_reused", AsyncMock(return_value=False))
+    monkeypatch.setattr(db, "is_transaction_id_reused", AsyncMock(return_value=False))
+    monkeypatch.setattr(db, "update_payment_transaction_id", AsyncMock(return_value=True))
+    mock_update_status = AsyncMock(return_value=True)
+    monkeypatch.setattr(db, "update_payment_status", mock_update_status)
+    mock_enqueue = AsyncMock(return_value="job_docx_99")
+    monkeypatch.setattr("app.queue.worker.enqueue", mock_enqueue)
+
+    await _process_receipt_screening(mock_bot, payload)
+
+    # التحقق من الموافقة التلقائية لنسخة Word
+    mock_update_status.assert_called_once()
+    assert mock_update_status.call_args[0][1] == "approved"
+    # التحقق من إدراج المهمة بالطابور بالمعرف 777 المسترجع تلقائياً
+    mock_enqueue.assert_called_once()
+    assert mock_enqueue.call_args[0][1]["cv_record_id"] == 777
+    # التحقق من استخدام send_document كبديل عند إخفاق send_photo
+    mock_bot.send_document.assert_called()
+    mock_bot.send_message.assert_called()
+

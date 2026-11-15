@@ -331,8 +331,14 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot | None = None)
 @user_router.message(Command("cancel"), StateFilter("*"))
 @user_router.callback_query(F.data == "action:cancel", StateFilter("*"))
 async def cmd_cancel(event: Message | CallbackQuery, state: FSMContext) -> None:
-    """إلغاء أي عملية حالية وتصفير الـ FSM تماماً."""
+    """إلغاء أي عملية حالية وتصفير الـ FSM تماماً وإلغاء أي دفعات معلقة عالقة."""
     await state.clear()
+    user_id = event.from_user.id if event.from_user else None
+    if user_id:
+        try:
+            await db.cancel_user_pending_payments(user_id)
+        except Exception:
+            pass
     text = "❌ تم إلغاء العملية بنجاح. يمكنك البدء من جديد عبر القائمة السفلية في أي وقت."
     if isinstance(event, CallbackQuery):
         await event.answer("تم الإلغاء")

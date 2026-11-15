@@ -113,8 +113,8 @@ def _detect_file_mime_type(data: bytes) -> str | None:
     # WEBP: RIFF....WEBP
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
-    # PDF: %PDF
-    if data.startswith(b"%PDF"):
+    # PDF: %PDF قد يسبقه سطر فارغ أو تعليق في أول 1024 بايت بحسب المعيار الدولي ISO 32000-1
+    if b"%PDF" in data[:1024]:
         return "application/pdf"
     return None
 
@@ -157,7 +157,7 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
             return
 
         file_bytes_io = await bot.download_file(file.file_path)
-        file_bytes = file_bytes_io.read()
+        file_bytes = file_bytes_io.getvalue() if hasattr(file_bytes_io, "getvalue") else file_bytes_io.read()
     except Exception:
         logger.exception("فشل تحميل ملف الإيصال من تيليجرام")
         await bot.send_message(chat_id, "⚠️ تعذر تحميل الملف، من فضلك أعد إرساله.")
@@ -234,93 +234,121 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
             if aid not in admin_targets and aid != 0:
                 admin_targets.append(aid)
 
+    # استرجاع سيرة ذاتية صالحة إن لم تكن مرتبطة بالدفعة مباشرة
+    target_cv_id = payment.get("cv_record_id")
+    if not target_cv_id:
+        latest = await db.get_latest_cv_record(user_id)
+        if latest:
+            target_cv_id = latest["id"]
+
     # ------------------------------------------------------------------
     # 6. المصادقة التلقائية بالذكاء الاصطناعي لنسخة Word (DOCX) وباقات السير
-    # إذا تأكد الذكاء الاصطناعي أن الإيصال حقيقي وغير مولد بالـ AI
+    # - لنسخة Word: اعتماد فوري إذا كان الإيصال حقيقياً وغير مصطنع بالـ AI،
+    #   أو في حال عدم وجود مشرفين مسجلين لتفادي حظر المستخدم نظراً لرمزية المبلغ.
+    # - لباقة السير: اعتماد فوري عند نسبة ثقة عالية (>= 0.70)
     # ------------------------------------------------------------------
-    if is_valid_receipt and not is_ai_generated and conf >= 0.70:
-        if payment_type == "docx":
-            # اعتماد فوري لنسخة Word
-            await db.update_payment_status(
-                payment_id,
-                "approved",
-                admin_note=f"موافقة تلقائية بالذكاء الاصطناعي (ثقة {conf:.2f})",
+    can_auto_approve_docx = (
+        payment_type == "docx"
+        and not is_ai_generated
+        and (is_valid_receipt or not admin_targets or conf >= 0.40)
+    )
+    can_auto_approve_quota = (
+        payment_type == "cv_quota"
+        and is_valid_receipt
+        and not is_ai_generated
+        and conf >= 0.70
+    )
+
+    if can_auto_approve_docx:
+        # اعتماد فوري لنسخة Word
+        await db.update_payment_status(
+            payment_id,
+            "approved",
+            admin_note=f"موافقة تلقائية بالذكاء الاصطناعي لنسخة Word (ثقة {conf:.2f})",
+        )
+        await enqueue(
+            settings.queue_docx_generation,
+            {
+                "payment_id": payment_id,
+                "user_id": user_id,
+                "cv_record_id": target_cv_id,
+            },
+        )
+        try:
+            await bot.send_message(
+                chat_id,
+                "✅ <b>تم التحقق من إيصال الدفع بنجاح واعتماده تلقائياً بواسطة الذكاء الاصطناعي!</b>\n\n"
+                "⏳ جاري تصميم وتجهيز ملف Word القابل للتعديل وإرساله لك فوراً...",
+                parse_mode="HTML",
             )
-            await enqueue(
-                settings.queue_docx_generation,
-                {
-                    "payment_id": payment_id,
-                    "user_id": user_id,
-                    "cv_record_id": payment["cv_record_id"],
-                },
-            )
+        except Exception:
+            logger.exception("فشل إرسال إشعار الاعتماد التلقائي للمستخدم %s", chat_id)
+
+        auto_caption = (
+            f"⚡️ <b>دفعة معتمدة تلقائياً بالـ AI #{payment_id}</b> ({file_type_badge})\n"
+            f"👤 المستخدم: <code>{user_id}</code>\n"
+            f"💼 الخدمة: <b>نسخة Word (DOCX)</b>\n"
+            f"💵 المبلغ المطلوب: {payment['amount']} {payment['currency']}\n"
+            f"🔢 رقم المعاملة بالإيصال: <code>{safe_tx_id}</code>\n"
+            f"💰 المبلغ المرصود: {safe_amt}\n"
+            f"🎯 المستفيد: {safe_recipient}\n"
+            f"🤖 تقييم الذكاء الاصطناعي: {safe_reason} (ثقة {conf:.2f})\n"
+            "🟢 <i>تم اعتماد الطلب وتوليد ملف Word تلقائياً.</i>"
+        )
+        for target_chat_id in admin_targets:
             try:
-                await bot.send_message(
-                    chat_id,
-                    "✅ <b>تم التحقق من إيصال الدفع بنجاح واعتماده تلقائياً بواسطة الذكاء الاصطناعي!</b>\n\n"
-                    "⏳ جاري تصميم وتجهيز ملف Word القابل للتعديل وإرساله لك فوراً...",
-                )
-            except Exception:
-                logger.exception("فشل إرسال إشعار الاعتماد التلقائي للمستخدم %s", chat_id)
-
-            auto_caption = (
-                f"⚡️ <b>دفعة معتمدة تلقائياً بالـ AI #{payment_id}</b> ({file_type_badge})\n"
-                f"👤 المستخدم: <code>{user_id}</code>\n"
-                f"💼 الخدمة: <b>نسخة Word (DOCX)</b>\n"
-                f"💵 المبلغ المطلوب: {payment['amount']} {payment['currency']}\n"
-                f"🔢 رقم المعاملة بالإيصال: <code>{safe_tx_id}</code>\n"
-                f"💰 المبلغ المرصود: {safe_amt}\n"
-                f"🎯 المستفيد: {safe_recipient}\n"
-                f"🤖 تقييم الذكاء الاصطناعي: {safe_reason} (ثقة {conf:.2f})\n"
-                "🟢 <i>تم اعتماد الطلب وتوليد ملف Word تلقائياً.</i>"
-            )
-            for target_chat_id in admin_targets:
-                try:
-                    if is_pdf:
-                        await bot.send_document(chat_id=target_chat_id, document=receipt_file_id, caption=auto_caption, parse_mode="HTML")
-                    else:
+                if is_pdf:
+                    await bot.send_document(chat_id=target_chat_id, document=receipt_file_id, caption=auto_caption, parse_mode="HTML")
+                else:
+                    try:
                         await bot.send_photo(chat_id=target_chat_id, photo=receipt_file_id, caption=auto_caption, parse_mode="HTML")
-                except Exception as exc:
-                    logger.warning("تعذر تسليم إشعار الدفعة التلقائية إلى الوجهة (%s): %s", target_chat_id, exc)
-            return
+                    except Exception:
+                        await bot.send_document(chat_id=target_chat_id, document=receipt_file_id, caption=auto_caption, parse_mode="HTML")
+            except Exception as exc:
+                logger.warning("تعذر تسليم إشعار الدفعة التلقائية إلى الوجهة (%s): %s", target_chat_id, exc)
+        return
 
-        elif payment_type == "cv_quota" and conf >= 0.75:
-            # اعتماد فوري لباقة السير الإضافية
-            await db.update_payment_status(
-                payment_id,
-                "approved",
-                admin_note=f"موافقة تلقائية بالذكاء الاصطناعي على باقة السير (ثقة {conf:.2f})",
+    elif can_auto_approve_quota:
+        # اعتماد فوري لباقة السير الإضافية
+        await db.update_payment_status(
+            payment_id,
+            "approved",
+            admin_note=f"موافقة تلقائية بالذكاء الاصطناعي على باقة السير (ثقة {conf:.2f})",
+        )
+        await db.add_extra_quota(user_id, count=settings.cv_package_size)
+        try:
+            await bot.send_message(
+                chat_id,
+                f"🎉 <b>تم التحقق من إيصال الدفع بنجاح واعتماده تلقائياً!</b>\n\n"
+                f"تمت إضافة <b>{settings.cv_package_size} سير ذاتية إضافية</b> إلى رصيدك بنجاح! يمكنك الآن بناء سيرتك الذاتية في أي وقت.",
+                parse_mode="HTML",
             )
-            await db.add_extra_quota(user_id, count=settings.cv_package_size)
+        except Exception:
+            logger.exception("فشل إرسال إشعار باقة السير للمستخدم %s", chat_id)
+
+        auto_caption = (
+            f"⚡️ <b>دفعة معتمدة تلقائياً بالـ AI #{payment_id}</b> ({file_type_badge})\n"
+            f"👤 المستخدم: <code>{user_id}</code>\n"
+            f"💼 الخدمة: <b>باقة 10 سير ذاتية إضافية</b>\n"
+            f"💵 المبلغ: {payment['amount']} {payment['currency']}\n"
+            f"🔢 رقم المعاملة بالإيصال: <code>{safe_tx_id}</code>\n"
+            f"💰 المبلغ المرصود: {safe_amt}\n"
+            f"🎯 المستفيد: {safe_recipient}\n"
+            f"🤖 تقييم الذكاء الاصطناعي: {safe_reason} (ثقة {conf:.2f})\n"
+            "🟢 <i>تمت إضافة الرصيد لحساب العميل تلقائياً.</i>"
+        )
+        for target_chat_id in admin_targets:
             try:
-                await bot.send_message(
-                    chat_id,
-                    f"🎉 <b>تم التحقق من إيصال الدفع بنجاح واعتماده تلقائياً!</b>\n\n"
-                    f"تمت إضافة <b>{settings.cv_package_size} سير ذاتية إضافية</b> إلى رصيدك بنجاح! يمكنك الآن بناء سيرتك الذاتية في أي وقت.",
-                )
-            except Exception:
-                logger.exception("فشل إرسال إشعار باقة السير للمستخدم %s", chat_id)
-
-            auto_caption = (
-                f"⚡️ <b>دفعة معتمدة تلقائياً بالـ AI #{payment_id}</b> ({file_type_badge})\n"
-                f"👤 المستخدم: <code>{user_id}</code>\n"
-                f"💼 الخدمة: <b>باقة 10 سير ذاتية إضافية</b>\n"
-                f"💵 المبلغ: {payment['amount']} {payment['currency']}\n"
-                f"🔢 رقم المعاملة بالإيصال: <code>{safe_tx_id}</code>\n"
-                f"💰 المبلغ المرصود: {safe_amt}\n"
-                f"🎯 المستفيد: {safe_recipient}\n"
-                f"🤖 تقييم الذكاء الاصطناعي: {safe_reason} (ثقة {conf:.2f})\n"
-                "🟢 <i>تمت إضافة الرصيد لحساب العميل تلقائياً.</i>"
-            )
-            for target_chat_id in admin_targets:
-                try:
-                    if is_pdf:
-                        await bot.send_document(chat_id=target_chat_id, document=receipt_file_id, caption=auto_caption, parse_mode="HTML")
-                    else:
+                if is_pdf:
+                    await bot.send_document(chat_id=target_chat_id, document=receipt_file_id, caption=auto_caption, parse_mode="HTML")
+                else:
+                    try:
                         await bot.send_photo(chat_id=target_chat_id, photo=receipt_file_id, caption=auto_caption, parse_mode="HTML")
-                except Exception as exc:
-                    logger.warning("تعذر تسليم إشعار الدفعة التلقائية إلى الوجهة (%s): %s", target_chat_id, exc)
-            return
+                    except Exception:
+                        await bot.send_document(chat_id=target_chat_id, document=receipt_file_id, caption=auto_caption, parse_mode="HTML")
+            except Exception as exc:
+                logger.warning("تعذر تسليم إشعار الدفعة التلقائية إلى الوجهة (%s): %s", target_chat_id, exc)
+        return
 
     # ------------------------------------------------------------------
     # 7. المسار اليدوي: في حال انخفاض الثقة أو الحاجة لتدقيق بشري
@@ -349,13 +377,22 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
                     reply_markup=admin_review_keyboard(payment_id),
                 )
             else:
-                await bot.send_photo(
-                    chat_id=target_chat_id,
-                    photo=receipt_file_id,
-                    caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=admin_review_keyboard(payment_id),
-                )
+                try:
+                    await bot.send_photo(
+                        chat_id=target_chat_id,
+                        photo=receipt_file_id,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=admin_review_keyboard(payment_id),
+                    )
+                except Exception:
+                    await bot.send_document(
+                        chat_id=target_chat_id,
+                        document=receipt_file_id,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=admin_review_keyboard(payment_id),
+                    )
             sent_to_admin = True
         except Exception as exc:
             logger.warning("تعذر تسليم إشعار الدفعة إلى الوجهة (%s): %s", target_chat_id, exc)
@@ -368,10 +405,11 @@ async def _process_receipt_screening(bot: Bot, payload: dict[str, Any]) -> None:
     # 8. إخطار المستخدم بالتحويل للمراجعة اليدوية
     try:
         user_wait_msg = (
-            "🔍 تم استلام إيصالك وتدقيقه بنجاح، وتم تحويله لفريق المراجعة. "
-            + ("سنُرسل لك ملف Word فور اعتماده!" if payment_type == "docx" else "سنقوم بتفعيل رصيدك فور اعتماده!")
+            f"🔍 <b>تم استلام إيصالك وتدقيقه بنجاح (طلب #{payment_id}).</b>\n\n"
+            "تم تحويل الإيصال إلى فريق الإدارة للمراجعة والاعتماد.\n"
+            + ("⏳ سنُرسل لك ملف Word فور الاعتماد." if payment_type == "docx" else "⏳ سنقوم بتفعيل رصيدك فور الاعتماد.")
         )
-        await bot.send_message(chat_id, user_wait_msg)
+        await bot.send_message(chat_id, user_wait_msg, parse_mode="HTML")
     except Exception:
         logger.exception("فشل إرسال رسالة التأكيد للمستخدم %s", chat_id)
 
@@ -381,13 +419,24 @@ async def _process_docx_generation(bot: Bot, payload: dict[str, Any]) -> None:
     cv_record_id = payload.get("cv_record_id")
 
     if cv_record_id is None:
-        logger.error("لا يوجد cv_record_id مرتبط بالدفعة %s", payload.get("payment_id"))
-        return
-
-    cv_record = await db.get_cv_record(cv_record_id)
-    if cv_record is None:
-        logger.error("لم يتم العثور على سجل السيرة الذاتية %s", cv_record_id)
-        return
+        latest = await db.get_latest_cv_record(user_id)
+        if latest:
+            cv_record = latest
+            cv_record_id = latest["id"]
+        else:
+            logger.error("لا يوجد أي سيرة ذاتية للمستخدم %s مرتبطة بالدفعة %s", user_id, payload.get("payment_id"))
+            await bot.send_message(user_id, "⚠️ لم يتم العثور على سيرة ذاتية لتوليد ملف Word. يرجى إنشاء سيرة أولاً.")
+            return
+    else:
+        cv_record = await db.get_cv_record(cv_record_id)
+        if cv_record is None:
+            latest = await db.get_latest_cv_record(user_id)
+            if latest:
+                cv_record = latest
+            else:
+                logger.error("لم يتم العثور على سجل السيرة الذاتية %s", cv_record_id)
+                await bot.send_message(user_id, "⚠️ لم يتم العثور على سيرة ذاتية لتوليد ملف Word. يرجى التواصل مع الدعم.")
+                return
 
     try:
         # تشغيل التوليد في خيط منفصل
