@@ -1161,21 +1161,29 @@ async def handle_upload_receipt_prompt(callback: CallbackQuery, state: FSMContex
 
 
 @user_router.message(
-    StateFilter(PaymentStates.waiting_for_receipt),
+    StateFilter(PaymentStates.waiting_for_receipt, None),
     F.photo | F.document,
 )
 async def handle_receipt_file(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
-    payment_type = data.get("payment_type") or ("cv_quota" if not data.get("cv_id") else "docx")
+    payment_type = data.get("payment_type")
     cv_id = data.get("cv_id")
 
-    if payment_type == "docx" and not cv_id:
-        await state.clear()
-        await message.answer(
-            "⚠️ عذراً، لم يتم العثور على السيرة الذاتية المرتبطة بهذا الإيصال (انتهت الجلسة).\n"
-            "يرجى إعادة اختيار طلب نسخة Word من رسالة السيرة السابقة."
-        )
-        return
+    # استرجاع تلقائي ذكي لآخر سيرة ذاتية في حال فقدان جلسة الذاكرة عند إعادة تشغيل السيرفر
+    if not cv_id:
+        try:
+            rs = await db.client.execute(
+                "SELECT id FROM cv_records WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+                [message.from_user.id],
+            )
+            if rs.rows:
+                cv_id = int(rs.rows[0][0])
+        except Exception:
+            pass
+
+    if not payment_type:
+        # إذا كان لديه سيرة ذاتية سابقة يرجح طلب Word، وإلا باقة سير
+        payment_type = "docx" if cv_id else "cv_quota"
 
     is_pdf = False
     if message.photo:

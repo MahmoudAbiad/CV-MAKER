@@ -90,10 +90,15 @@ async def _setup_webhook_safe(webhook_url: str) -> None:
     """إعداد الـ Webhook مع محاولات إعادة الاتصال عند فشل الشبكة دون إسقاط السيرفر."""
     for attempt in range(1, 4):
         try:
+            current_info = await bot.get_webhook_info()
+            if current_info.url == webhook_url:
+                logger.info("✅ الـ Webhook مضبوط مسبقاً بشكل صحيح على: %s", webhook_url)
+                return
+
             await bot.set_webhook(
                 url=webhook_url,
                 secret_token=settings.webhook_secret,
-                drop_pending_updates=True,
+                drop_pending_updates=False,
                 allowed_updates=["message", "callback_query"],
             )
             logger.info("✅ تم ضبط الـ Webhook بنجاح على: %s", webhook_url)
@@ -186,7 +191,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="CV Generator Bot", lifespan=lifespan)
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def health_check() -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "cv-generator-bot"})
 
