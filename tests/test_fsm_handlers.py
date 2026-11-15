@@ -21,6 +21,7 @@ from app.bot.handlers import (
     handle_cv_style_choice,
     handle_free_text_cv,
     handle_more_info_choice,
+    handle_more_info_reply,
     handle_save_edited_section,
     handle_start_edit_section,
     handle_skip_more_info,
@@ -204,3 +205,33 @@ async def test_admin_only_middleware_blocks_unauthorized(mock_callback: Callback
     result_admin = await middleware(handler, mock_callback, event_data)
     assert result_admin == "HANDLER_CALLED"
     handler.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_more_info_reply_attaches_dialogue_context(
+    mock_message: Message, fsm_context: FSMContext, monkeypatch: pytest.MonkeyPatch
+):
+    """التحقق من ربط إجابة المستخدم بسياق السؤال المطروح لمنع التكرار والتعليق"""
+    await fsm_context.set_state(CvBuildStates.waiting_for_more_info)
+    await fsm_context.update_data(
+        raw_text="أحمد، هاتف 0991234567",
+        last_question_text="شو آخر شركة اشتغلت معها ومسماك الوظيفي؟",
+        attempts=1,
+    )
+    mock_message.text = "محاسب في شركة الشام"
+
+    passed_raw_text = []
+    async def fake_completeness_check(msg, state, raw_text, lang, style, attempts, bot, force_complete=False):
+        passed_raw_text.append(raw_text)
+
+    monkeypatch.setattr("app.bot.handlers._run_completeness_check", fake_completeness_check)
+
+    mock_bot = AsyncMock()
+    await handle_more_info_reply(mock_message, fsm_context, mock_bot)
+
+    data = await fsm_context.get_data()
+    assert "[سؤال توضيحي: شو آخر شركة اشتغلت معها ومسماك الوظيفي؟]" in data["raw_text"]
+    assert "[إجابة المستخدم: محاسب في شركة الشام]" in data["raw_text"]
+    assert data["last_question_text"] is None
+    assert len(passed_raw_text) == 1
+    assert "شركة الشام" in passed_raw_text[0]

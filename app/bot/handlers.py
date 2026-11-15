@@ -54,7 +54,8 @@ logger = logging.getLogger(__name__)
 user_router = Router(name="user")
 admin_router = Router(name="admin")
 
-MAX_INFO_ROUNDS = 4
+# تقليل جولات الاستفسار إلى جولتين كحد أقصى لمنع إرهاق المستخدم وتفادي التكرار
+MAX_INFO_ROUNDS = 2
 
 MENU_BUTTON_TEXTS = {
     "📄 بناء CV جديد",
@@ -527,14 +528,17 @@ async def _run_completeness_check(
         question_type = question.get("question_type")
         options = [o for o in (question.get("options") or []) if isinstance(o, str) and o.strip()]
 
-        await state.update_data(attempts=attempts + 1)
+        await state.update_data(
+            attempts=attempts + 1,
+            last_question_text=question_text,
+        )
         await state.set_state(CvBuildStates.waiting_for_more_info)
 
         if question_type == "choice" and 2 <= len(options) <= 4:
             await state.update_data(pending_question_text=question_text, pending_options=options)
             await message.answer(question_text, reply_markup=more_info_choice_keyboard(options))
         else:
-            await state.update_data(pending_question_text=None, pending_options=None)
+            await state.update_data(pending_question_text=question_text, pending_options=None)
             await message.answer(question_text, reply_markup=more_info_text_keyboard())
         return
 
@@ -590,12 +594,23 @@ async def handle_more_info_reply(message: Message, state: FSMContext, bot: Bot) 
     language = data.get("language", "ar")
     style = data.get("style", "enhanced")
     attempts = data.get("attempts", 0)
+    last_question = data.get("last_question_text")
 
-    combined_text = f"{raw_text}\n{message.text}".strip()
+    # إلحاق الإجابة مصحوبة بسياق السؤال المطروح ليفهم الذكاء الاصطناعي دلالة الردود المقتضبة
+    if last_question:
+        combined_text = f"{raw_text}\n[سؤال توضيحي: {last_question}]\n[إجابة المستخدم: {message.text}]".strip()
+    else:
+        combined_text = f"{raw_text}\n{message.text}".strip()
+
     if len(combined_text) > 6000:
         combined_text = combined_text[:6000]
 
-    await state.update_data(raw_text=combined_text, pending_question_text=None, pending_options=None)
+    await state.update_data(
+        raw_text=combined_text,
+        last_question_text=None,
+        pending_question_text=None,
+        pending_options=None,
+    )
     await state.set_state(CvBuildStates.processing)
 
     await _run_completeness_check(message, state, combined_text, language, style, attempts=attempts, bot=bot)
@@ -608,7 +623,7 @@ async def handle_more_info_choice(callback: CallbackQuery, state: FSMContext, bo
     await callback.answer()
     data = await state.get_data()
     options: list[str] = data.get("pending_options") or []
-    question_text: str = data.get("pending_question_text") or ""
+    question_text: str = data.get("pending_question_text") or data.get("last_question_text") or ""
 
     try:
         option_idx = int(callback.data.split(":")[1])
@@ -631,8 +646,20 @@ async def handle_more_info_choice(callback: CallbackQuery, state: FSMContext, bo
     style = data.get("style", "enhanced")
     attempts = data.get("attempts", 0)
 
-    combined_text = f"{raw_text}\n{question_text}: {selected_option}".strip()
-    await state.update_data(raw_text=combined_text, pending_question_text=None, pending_options=None)
+    if question_text:
+        combined_text = f"{raw_text}\n[سؤال توضيحي: {question_text}]\n[إجابة المستخدم: {selected_option}]".strip()
+    else:
+        combined_text = f"{raw_text}\n{selected_option}".strip()
+
+    if len(combined_text) > 6000:
+        combined_text = combined_text[:6000]
+
+    await state.update_data(
+        raw_text=combined_text,
+        last_question_text=None,
+        pending_question_text=None,
+        pending_options=None,
+    )
     await state.set_state(CvBuildStates.processing)
 
     await _run_completeness_check(callback.message, state, combined_text, language, style, attempts=attempts, bot=bot)

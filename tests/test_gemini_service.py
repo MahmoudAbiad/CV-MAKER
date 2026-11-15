@@ -33,6 +33,7 @@ def test_latest_gemini_models_configured():
     assert DEFAULT_TEXT_MODEL == "gemini-3.5-flash-lite"
     assert DEFAULT_VISION_MODEL == "gemini-3.5-flash-lite"
     assert FALLBACK_MODELS[0] == "gemini-3.5-flash-lite"
+    assert FALLBACK_MODELS[1] == "gemma-4-31b-it"
     assert "gemini-3.1-flash-lite" in FALLBACK_MODELS
     assert "gemini-2.5-flash-lite" in FALLBACK_MODELS
     assert "gemini-3.6-flash" in FALLBACK_MODELS

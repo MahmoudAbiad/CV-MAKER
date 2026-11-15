@@ -28,6 +28,7 @@ DEFAULT_TEXT_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_VISION_MODEL = "gemini-3.5-flash-lite"
 FALLBACK_MODELS = [
     "gemini-3.5-flash-lite",
+    "gemma-4-31b-it",
     "gemini-3.1-flash-lite",
     "gemini-2.5-flash-lite",
     "gemini-3.6-flash",
@@ -244,25 +245,28 @@ _COMPLETENESS_INSTRUCTIONS = {
         "الحد الأدنى الإلزامي لاعتماد السيرة الذاتية وإنشاء الملف (status = 'complete'):\n"
         "1) الاسم الكامل لصاحب السيرة الذاتية.\n"
         "2) وسيلة تواصل أساسية واحدة على الأقل (رقم هاتف أو بريد إلكتروني).\n"
-        "3) جهة خبرة عملية أو مؤهل تعليمي (شركة أو جامعة/معهد مع تحديد الفترة الزمنية التقريبية).\n"
-        "4) ثلاث مهارات مهنية أو تقنية واضحة على الأقل.\n\n"
-        "إذا تحققت هذه المتطلبات الأساسية، اجعل status = 'complete' واجعل question = {} و follow_up_message = '' "
-        "واستخرج كافة حقول السيرة الذاتية.\n\n"
-        "أما عند وجود نقص جوهري، اجعل status = 'needs_more_info' والتزم بالشروط التالية بدقة متناهية:\n"
-        "1. اطرح سؤالاً واحداً فقط يركز على العنصر الأكثر أهمية ونقصاً.\n"
+        "3) جهة خبرة عملية واحدة (شركة ومسمى، حتى لو بدون تاريخ محدد) أو مؤهل تعليمي واحد (جامعة أو معهد أو تخصص).\n"
+        "4) مهارتان مهنيتان أو تقنيتان على الأقل.\n\n"
+        "ضوابط حظر التكرار والمرونة الذكية (Anti-Loop & Smart Tolerance Directives):\n"
+        "• قبول الإجابات الجزئية وتفادي التكرار: إذا ذكر المستخدم اسم شركة فقط دون مسمى، أو مسمى دون شركة أو فترة، فاقبله فوراً كخبرة وضع فترة تقديرية ('حديثاً') ولا ترفضه ولا تسأل عنه مجدداً.\n"
+        "• حالات عدم وجود خبرة (خريج جديد / طالب / لا يوجد عمل سابق): إذا ذكر المستخدم في أي موضع أنه لا يملك خبرة، أو طالب، أو خريج جديد، اعتبر قسم الخبرات مكتملاً تلقائياً واكتفِ بالتعليم أو المهارات واجعل status = 'complete'.\n"
+        "• حظر التكرار القاطع: يُمنع منعاً باتاً إعادة طرح نفس السؤال أو السؤال عن معلومة سبق للمستخدم أن أجاب عنها أو تضمنتها الأسئلة التوضيحية السابقة.\n"
+        "• إذا تحققت هذه المتطلبات الأساسية، اجعل status = 'complete' واجعل question = {} و follow_up_message = '' واستخرج كافة حقول السيرة الذاتية.\n\n"
+        "أما عند وجود نقص جوهري مانع (غياب الاسم تماماً، أو انعدام تام لأي وسيلة تواصل، أو انعدام تام للتعليم والخبرة معاً)، اجعل status = 'needs_more_info' مع مراعاة:\n"
+        "1. اطرح سؤالاً واحداً فقط يركز حصراً على النقص الحقيقي دون افتراض نقص ما تم تزويدك به جزئياً.\n"
         "2. نبرة ولهجة السؤال: عامية سورية مهذبة وودودة جداً تعكس كرم الضيافة والاحترام الشامي الأصيل "
         "(مثل: 'يا هلا فيك'، 'يسلم إيديك'، 'يعطيك ألف عافية يا رب'، 'تكرّم علينا'، 'ولا يهمك، بس ناقصنا...').\n"
         "3. التضمين الإلزامي للأمثلة التوضيحية (Micro-Examples): يجب أن يحتوي كل سؤال مفتوح على مثال توضيحي محدد بين قوسين "
         "`(مثال: ...)` يُبيّن للمستخدم التنسيق المطلوب والمستوى المتوقع بدقة متناهية، لتجنيبه الحيرة أو الردود المقتضبة.\n"
-        "   قوالب استرشادية ملزمة باللهجة السورية المهذبة مع الأمثلة:\n"
-        "   • لنقص بيانات الخبرة والعمل:\n"
-        "     'يعطيك ألف عافية يا رب! بس تخبرنا شو آخر شركة أو جهة اشتغلت معها ومسماك الوظيفي؟ (مثال: محاسب في شركة الشام التجارية، 2021 - 2023)'\n"
+        "   نماذج استرشادية مرنة باللهجة السورية المهذبة مع الأمثلة:\n"
+        "   • لنقص بيانات الخبرة والعمل (إن لم يذكر خبرة ولم يكن طالباً/خريجاً):\n"
+        "     'يعطيك ألف عافية يا رب! بس تخبرنا شو آخر شركة أو جهة اشتغلت معها ومسماك الوظيفي؟ (مثال: محاسب في شركة الشام التجارية)'\n"
         "   • لنقص معلومات التواصل:\n"
         "     'يسلم إيديك! بس تكرّم علينا برقم تواصل أو إيميل مشان نضيفه لمعلومات الاتصال؟ (مثال: 0991234567 أو name@email.com)'\n"
         "   • لنقص المهارات المهنية والتقنية:\n"
-        "     'أهلاً بك! شو أهم 3 مهارات أو برامج بتتقنها بمجال شغلك؟ (مثال: Excel المتقدم، إدارة المستودعات، مهارات التفاوض)'\n"
+        "     'أهلاً بك! شو أهم مهارتين أو برامج بتتقنها بمجال شغلك؟ (مثال: Excel المتقدم، إدارة المستودعات)'\n"
         "   • لنقص المؤهل التعليمي أو التخصص:\n"
-        "     'يسعد أوقاتك! شو آخر شهادة دراسية حصلت عليها أو جامعتك وتاريخ التخرج؟ (مثال: بكالوريوس إدارة أعمال - جامعة دمشق، 2022)'\n"
+        "     'يسعد أوقاتك! شو آخر شهادة دراسية حصلت عليها أو جامعتك وتاريخ التخرج؟ (مثال: بكالوريوس إدارة أعمال - جامعة دمشق)'\n"
         "   • لنقص الاسم الكامل:\n"
         "     'يا هلا فيك! تكرّم علينا باسمك الكريم الثلاثي لنضعه في أعلى السيرة الذاتية؟ (مثال: أحمد محمد العلي)'\n"
         "4. نوع السؤال (question_type):\n"
@@ -277,17 +281,17 @@ _COMPLETENESS_INSTRUCTIONS = {
         "Minimum requirements for CV completion (status = 'complete'):\n"
         "1) Full name.\n"
         "2) At least one primary contact method (phone or email).\n"
-        "3) A work experience entry or educational qualification with approximate timeframe.\n"
-        "4) At least 3 specific professional or technical skills.\n\n"
-        "If these core requirements are met, set status = 'complete', question = {}, follow_up_message = '', and extract all fields.\n\n"
+        "3) A work experience entry (company or role, even partial) OR an educational qualification.\n"
+        "4) At least 2 specific professional or technical skills.\n\n"
+        "Anti-Loop & Smart Tolerance Directives:\n"
+        "• Accept partial info: If a company or role is provided without dates, accept it without re-prompting.\n"
+        "• Fresh graduates / No experience: If user indicates no prior work experience, mark experience as complete and rely on education.\n"
+        "• Strictly NEVER repeat a question previously asked or inquire about data already touched upon.\n"
+        "• If these core requirements are met, set status = 'complete', question = {}, follow_up_message = '', and extract all fields.\n\n"
         "If critical data is missing, set status = 'needs_more_info' under these strict conversational rules:\n"
         "1. Ask exactly ONE focused question addressing the most critical missing element.\n"
         "2. Dialect & Tone: Warm, respectful, polite Syrian Arabic (e.g., 'يا هلا فيك', 'يعطيك ألف عافية يا رب', 'تكرّم علينا', 'يسلم إيديك').\n"
-        "3. Mandatory Micro-Example: Every open question MUST include a concrete, concise example in parentheses `(مثال: ...)` to guide user precision.\n"
-        "   Example patterns:\n"
-        "   - Missing experience: 'يعطيك ألف عافية يا رب! بس تخبرنا شو آخر شركة أو جهة اشتغلت معها ومسماك الوظيفي؟ (مثال: محاسب في شركة الشام، 2021 - 2023)'\n"
-        "   - Missing contact: 'يسلم إيديك! بس تكرّم علينا برقم تواصل أو إيميل؟ (مثال: 0991234567 أو name@email.com)'\n"
-        "   - Missing skills: 'أهلاً بك! شو أهم 3 مهارات أو أدوات بتتقنها بشغلك؟ (مثال: Excel المتقدم، خدمة العملاء، إدارة المبيعات)'\n"
+        "3. Mandatory Micro-Example: Every open question MUST include a concrete, concise example in parentheses `(مثال: ...)`.\n"
         "4. Set question_type to 'choice' ONLY for naturally bounded options (providing 2-4 items in options array), otherwise 'open'.\n"
         "5. Mirror the exact question text in follow_up_message.\n"
         "6. Never summarize previous input; start directly with the warm greeting and question."
@@ -601,11 +605,11 @@ async def close_http_client() -> None:
 
 
 async def _call_gemini_with_retry(
-    url: str, body: dict[str, Any], max_retries: int = 4
+    url: str, body: dict[str, Any], max_retries: int = 1
 ) -> dict[str, Any]:
     """
-    استدعاء آمن لـ Gemini API مع تراجع أسي وعشوائية (Exponential Backoff with Jitter)
-    ومعالجة صحيحة لكل من HTTP 429 وأخطاء الخادم المؤقتة 5xx.
+    استدعاء آمن لـ Gemini API. ينتقل فوراً للنموذج التالي عند أول فشل (max_retries=1 افتراضياً).
+    يدعم إعادة المحاولة عند الحاجة مع تراجع أسي وعشوائية.
     يتم تمرير مفتاح الـ API عبر الترويسة x-goog-api-key لمنع تسريبه في السجلات أو عناوين URL.
     """
     base_delay = 1.5
@@ -809,7 +813,7 @@ async def verify_payment_receipt(image_bytes: bytes, mime_type: str = "image/jpe
     preferred_model = getattr(settings, "gemini_vision_model", None) or DEFAULT_VISION_MODEL
     candidate_models = [preferred_model]
     for m in FALLBACK_MODELS:
-        if m not in candidate_models:
+        if m not in candidate_models and not m.startswith("gemma"):
             candidate_models.append(m)
 
     target_code = getattr(settings, "sham_cash_code", "")
