@@ -62,7 +62,7 @@ async def _process_cv_generation(bot: Bot, payload: dict[str, Any]) -> None:
     if cv_id is not None:
         docx_prompt = (
             "💡 <b>بتحب تعدل بياناتك أو تضيف خبرات جديدة بالمستقبل؟</b>\n\n"
-            "تقدر تحصل على ملف <b>Word (DOCX)</b> المفتوح لتعدل وتضيف عليه بأي وقت وبكل سهولة من موبايلك أو لابتوبك."
+            "تقدر تحصل على نسخة <b>Word (DOCX)</b> المفتوحة لتعدل وتضيف عليها بأي وقت وبكل سهولة من موبايلك أو لابتوبك."
         )
         await bot.send_message(chat_id, docx_prompt, parse_mode="HTML", reply_markup=docx_offer_keyboard(cv_id))
     else:
@@ -255,6 +255,10 @@ _HANDLERS = {
     settings.queue_cv_generation: _process_cv_generation_safe,
     settings.queue_receipt_screening: _process_receipt_screening,
     settings.queue_docx_generation: _process_docx_generation_safe,
+    # أسماء مرجعية معيارية للتوافق والاختبارات
+    "cv": _process_cv_generation_safe,
+    "receipt": _process_receipt_screening,
+    "docx": _process_docx_generation_safe,
 }
 
 

@@ -656,7 +656,7 @@ async def handle_start_edit_section(callback: CallbackQuery, state: FSMContext) 
     }
 
     prompt = section_prompts.get(section, "أرسل التعديلات المطلوبة:")
-    await state.update_data(editing_section_name=section)
+    await state.update_data(editing_section=section, editing_section_name=section)
     await state.set_state(CvBuildStates.editing_section)
 
     await callback.message.answer(prompt, reply_markup=cv_edit_cancel_keyboard())
@@ -696,6 +696,8 @@ async def handle_save_edited_section(message: Message, state: FSMContext) -> Non
 
     if section == "summary":
         cv_data["summary"] = new_text
+    elif section in ("title", "job_title"):
+        cv_data["title"] = new_text
     elif section == "skills":
         items = [s.strip() for s in re.split(r"[,،\n]+", new_text) if s.strip()]
         cv_data["skills"] = items
