@@ -33,8 +33,13 @@ def test_latest_gemini_models_configured():
     assert DEFAULT_TEXT_MODEL == "gemini-3.5-flash-lite"
     assert DEFAULT_VISION_MODEL == "gemini-3.5-flash-lite"
     assert FALLBACK_MODELS[0] == "gemini-3.5-flash-lite"
-    assert "gemini-3.8-flash" in FALLBACK_MODELS
+    assert "gemini-3.1-flash-lite" in FALLBACK_MODELS
+    assert "gemini-2.5-flash-lite" in FALLBACK_MODELS
     assert "gemini-3.6-flash" in FALLBACK_MODELS
+    assert "gemini-2.5-flash" in FALLBACK_MODELS
+    assert "gemini-3.8-flash" in FALLBACK_MODELS
+    # التأكد من وضع النموذج الأكثر ازدحاماً (gemini-3.8-flash) في نهاية القائمة لتفادي طوابير الانتظار
+    assert FALLBACK_MODELS[-1] == "gemini-3.8-flash"
 
     assert _supports_modern_thinking_config("gemini-3.5-flash-lite") is True
     assert _supports_modern_thinking_config("gemini-3.8-flash") is True

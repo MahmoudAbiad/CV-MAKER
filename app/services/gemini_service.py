@@ -23,15 +23,16 @@ logger = logging.getLogger(__name__)
 
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
-# النموذج الافتراضي الأسرع والأعلى كفاءة (Gemini 3.5 Flash-Lite) مع سلسلة بدائل متدرجة
+# النموذج الافتراضي الأسرع والأعلى كفاءة (Gemini 3.5 Flash-Lite) مع سلسلة بدائل مجانية مرتبة تصاعدياً حسب الازدحام
 DEFAULT_TEXT_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_VISION_MODEL = "gemini-3.5-flash-lite"
 FALLBACK_MODELS = [
     "gemini-3.5-flash-lite",
-    "gemini-3.8-flash",
-    "gemini-3.6-flash",
     "gemini-3.1-flash-lite",
     "gemini-2.5-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+    "gemini-3.8-flash",  # وضع في النهاية لكفاءته العالية مع تأجيله بسبب ضغط الاستخدام والازدحام
 ]
 
 

@@ -149,3 +149,25 @@ def test_handlers_map_registry():
     assert callable(_HANDLERS["queue:cv_generation"])
     assert callable(_HANDLERS["queue:receipt_screening"])
     assert callable(_HANDLERS["queue:docx_generation"])
+
+
+@pytest.mark.asyncio
+async def test_dequeue_multi_blocking_backoff_on_connection_error(monkeypatch: pytest.MonkeyPatch):
+    """التحقق من تفادي حلقة التكرار السريعة (Busy Loop) بانتظار مؤقت عند انقطاع Redis"""
+    from redis.exceptions import ConnectionError as RedisConnError
+    from app.queue.redis_client import dequeue_multi_blocking
+
+    mock_redis = MagicMock()
+    mock_redis.brpop = AsyncMock(side_effect=RedisConnError("Error -2 connecting to host: Name or service not known"))
+
+    sleep_called_with = []
+    async def fake_sleep(secs: float):
+        sleep_called_with.append(secs)
+
+    monkeypatch.setattr("app.queue.redis_client.get_redis", lambda: mock_redis)
+    monkeypatch.setattr("app.queue.redis_client.reset_redis", AsyncMock())
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = await dequeue_multi_blocking(["test_queue"], timeout=30)
+    assert result is None
+    assert 2.0 in sleep_called_with

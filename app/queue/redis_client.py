@@ -57,9 +57,10 @@ async def enqueue(queue_name: str, payload: dict[str, Any]) -> None:
     try:
         r = get_redis()
         await r.lpush(queue_name, json.dumps(payload, ensure_ascii=False))
-    except (RedisConnectionError, RedisTimeoutError):
+    except (RedisConnectionError, RedisTimeoutError, OSError):
         logger.warning("تعذر الإرسال إلى Redis، جاري إعادة المحاولة بعد تجديد الاتصال...")
         await reset_redis()
+        await asyncio.sleep(1.0)
         r = get_redis()
         await r.lpush(queue_name, json.dumps(payload, ensure_ascii=False))
 
@@ -85,12 +86,15 @@ async def dequeue_multi_blocking(queues: list[str], timeout: int = 30) -> tuple[
         queue_name, raw_payload = result
         return queue_name, json.loads(raw_payload)
     except (RedisConnectionError, RedisTimeoutError, OSError) as exc:
-        logger.warning("انقطاع أو مهلة في اتصال Redis: %s", exc)
+        logger.warning("انقطاع أو مهلة في اتصال Redis: %s (انتظار ثانيتين لتفادي استنزاف الموارد)", exc)
         await reset_redis()
+        await asyncio.sleep(2.0)
         return None
     except json.JSONDecodeError as exc:
         logger.error("رسالة غير صالحة JSON من الطابور: %s", exc)
         return None
     except RedisError as exc:
-        logger.error("خطأ عام من عميل Redis: %s", exc)
+        logger.error("خطأ عام من عميل Redis: %s (انتظار ثانيتين لتفادي استنزاف الموارد)", exc)
+        await reset_redis()
+        await asyncio.sleep(2.0)
         return None

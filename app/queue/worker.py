@@ -272,8 +272,14 @@ async def _unified_worker_loop(bot: Bot) -> None:
 
     while True:
         try:
+            loop_start = asyncio.get_running_loop().time()
             item = await dequeue_multi_blocking(queues, timeout=30)
             if item is None:
+                # إذا عادت الدالة في وقت وجيز جداً (أقل من نصف ثانية) دون مهام، فهذا يشير لانقطاع اتصال
+                # نضمن وجود مهلة أمان لمنع أي حلقة تكرار سريعة (Busy Loop)
+                elapsed = asyncio.get_running_loop().time() - loop_start
+                if elapsed < 1.0:
+                    await asyncio.sleep(2.0)
                 continue
             queue_name, payload = item
             handler = _HANDLERS.get(queue_name)
