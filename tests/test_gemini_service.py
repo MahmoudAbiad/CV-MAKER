@@ -29,22 +29,22 @@ from app.services.gemini_service import (
 
 
 def test_latest_gemini_models_configured():
-    """التحقق من ضبط أحدث نماذج Gemini 3.8 و 3.6 و 3.5 Flash-Lite وإعدادات التفكير"""
-    assert DEFAULT_TEXT_MODEL == "gemini-3.8-flash"
-    assert DEFAULT_VISION_MODEL == "gemini-3.8-flash"
+    """التحقق من ضبط نموذج Gemini 3.5 Flash-Lite كخيار افتراضي مع سلسلة البدائل وإعدادات التفكير"""
+    assert DEFAULT_TEXT_MODEL == "gemini-3.5-flash-lite"
+    assert DEFAULT_VISION_MODEL == "gemini-3.5-flash-lite"
+    assert FALLBACK_MODELS[0] == "gemini-3.5-flash-lite"
     assert "gemini-3.8-flash" in FALLBACK_MODELS
     assert "gemini-3.6-flash" in FALLBACK_MODELS
-    assert "gemini-3.5-flash-lite" in FALLBACK_MODELS
 
+    assert _supports_modern_thinking_config("gemini-3.5-flash-lite") is True
     assert _supports_modern_thinking_config("gemini-3.8-flash") is True
-    assert _supports_modern_thinking_config("gemini-3.6-flash") is True
-    assert _supports_modern_thinking_config("gemini-2.5-flash") is False
+    assert _supports_modern_thinking_config("gemini-2.5-flash-lite") is False
 
-    cfg_modern = _build_generation_config("gemini-3.8-flash", _CV_CHECK_SCHEMA, 16384)
+    cfg_modern = _build_generation_config("gemini-3.5-flash-lite", _CV_CHECK_SCHEMA, 16384)
     assert "temperature" not in cfg_modern
     assert cfg_modern.get("thinkingConfig") == {"thinkingLevel": "low"}
 
-    cfg_legacy = _build_generation_config("gemini-2.5-flash", _CV_CHECK_SCHEMA, 16384, legacy_temperature=0.2)
+    cfg_legacy = _build_generation_config("gemini-2.5-flash-lite", _CV_CHECK_SCHEMA, 16384, legacy_temperature=0.2)
     assert cfg_legacy.get("temperature") == 0.2
     assert "thinkingConfig" not in cfg_legacy
 

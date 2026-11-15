@@ -30,9 +30,9 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_TEXT_MODEL
-        value: gemini-3.8-flash
+        value: gemini-3.5-flash-lite
       - key: GEMINI_VISION_MODEL
-        value: gemini-3.8-flash
+        value: gemini-3.5-flash-lite
       - key: SHAM_CASH_CODE
         sync: false
       - key: DOCX_PRICE_USD

@@ -1,8 +1,8 @@
 """
-خدمة التكامل مع Google Gemini API (محدثة لأحدث نماذج السلسلة 3.8 / 3.6)
+خدمة التكامل مع Google Gemini API (محدثة لأحدث نماذج السلسلة 3.5 Flash-Lite / 3.8 / 3.6)
 - استخراج وهيكلة بيانات السيرة الذاتية من نصوص حرة (Structured JSON Output)
 - التحقق الذكي من إيصالات الدفع المالي (Sham Cash receipts) عبر Gemini Multimodal Vision
-- دعم كامل لمعاملات نماذج Gemini 3.8 Flash و 3.6 Flash و 3.5 Flash-Lite (thinkingLevel="low"، تصفية أجزاء التفكير thought parts، وإزالة معاملات temperature المتقادمة)
+- دعم كامل لمعاملات نماذج Gemini 3.5 Flash-Lite و 3.8 Flash و 3.6 Flash (thinkingLevel="low"، تصفية أجزاء التفكير thought parts، وإزالة معاملات temperature المتقادمة)
 - إدارة متينة للشبكة والتراجع الأسي (Exponential Backoff with Jitter) عند 429 وأخطاء الخادم 5xx
 """
 from __future__ import annotations
@@ -23,14 +23,15 @@ logger = logging.getLogger(__name__)
 
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
-# أحدث نماذج Gemini الرسمية المستقرة (نوفمبر 2026) مع سلسلة بدائل متدرجة
-DEFAULT_TEXT_MODEL = "gemini-3.8-flash"
-DEFAULT_VISION_MODEL = "gemini-3.8-flash"
+# النموذج الافتراضي الأسرع والأعلى كفاءة (Gemini 3.5 Flash-Lite) مع سلسلة بدائل متدرجة
+DEFAULT_TEXT_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_VISION_MODEL = "gemini-3.5-flash-lite"
 FALLBACK_MODELS = [
+    "gemini-3.5-flash-lite",
     "gemini-3.8-flash",
     "gemini-3.6-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-2.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
 ]
 
 
@@ -52,8 +53,8 @@ def _build_generation_config(
     """
     يبني كائن generationConfig متوافقاً مع جيل النموذج المستهدف:
     - لنماذج Gemini 3.x / 4.x: يضبط thinkingLevel="low" لتقليل زمن الاستجابة ومنع استنزاف
-      ميزانية التوكنز في التفكير الداخلي، مع حذف temperature المتقادم وفق دليل الترقية الرسمي.
-    - للنماذج الأقدم (مثل gemini-2.5-flash): يمرر temperature التقليدي للتوافق العكسي.
+      ميزانية التوكنز في التفكير الداخلي أو الانحلال في نماذج flash-lite، مع حذف temperature المتقادم.
+    - للنماذج الأقدم (مثل gemini-2.5-*): يمرر temperature التقليدي للتوافق العكسي.
     """
     config: dict[str, Any] = {
         "responseMimeType": "application/json",
